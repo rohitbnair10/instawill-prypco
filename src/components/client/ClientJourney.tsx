@@ -231,7 +231,16 @@ export function ClientJourney() {
     );
   }
 
-  return <IntakeWizard />;
+  return (
+    <div>
+      <div className="border-b border-hairline bg-paper px-5 py-2 text-right lg:px-10">
+        <button className="text-xs text-slate underline" onClick={switchIdentity}>
+          ← See pending items / switch client
+        </button>
+      </div>
+      <IntakeWizard />
+    </div>
+  );
 }
 
 /**
