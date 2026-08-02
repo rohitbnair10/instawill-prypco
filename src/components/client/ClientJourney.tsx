@@ -40,6 +40,7 @@ import {
   updateLead,
   useDB,
   willsForLead,
+  type DB,
 } from "@/lib/store";
 import { uploadDocumentFile } from "@/lib/storage";
 import { LiveWill } from "@/components/LiveWill";
@@ -62,6 +63,26 @@ const STEPS = ["Identity", "Your wishes", "Confirm", "Documents", "Review"] as c
 
 const STAGE_FOR_STEP: LeadStage[] = ["identity", "wishes", "confirm", "documents", "review"];
 
+/**
+ * There's no real login in this prototype, so we track "who this browser is"
+ * locally — mirroring how the production RLS policies in supabase/schema.sql
+ * scope a client to only their own lead (matched by auth email). Without this,
+ * the "welcome back" picker would show every client's pending approvals and
+ * lawyer questions to whoever opens the tab, which is a real privacy bug, not
+ * just a demo wrinkle.
+ */
+const CURRENT_LEAD_KEY = "instawill.currentLeadId";
+
+function getStoredLeadId(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(CURRENT_LEAD_KEY);
+}
+function setStoredLeadId(id: string | null) {
+  if (typeof window === "undefined") return;
+  if (id) window.localStorage.setItem(CURRENT_LEAD_KEY, id);
+  else window.localStorage.removeItem(CURRENT_LEAD_KEY);
+}
+
 function identityFromDraft(draft: IntakeDraft): Identity {
   return {
     full_name: draft.passport.full_name,
@@ -82,9 +103,25 @@ export function ClientJourney() {
   const [approvalWillId, setApprovalWillId] = useState<string | null>(null);
   const [respondingClarificationId, setRespondingClarificationId] = useState<string | null>(null);
   const [manualIntake, setManualIntake] = useState(false);
+  const [currentLeadId, setCurrentLeadId] = useState<string | null>(null);
 
-  const pendingApproval = db.wills.filter((w) => w.status === "pending_client_approval");
-  const pendingClarifications = db.clarifications.filter((c) => c.status === "sent");
+  // Read "who this browser is" after mount (localStorage isn't available
+  // during SSR). Matches getServerSnapshot's SSR pass, which also has none —
+  // no hydration mismatch, just a brief moment before the login-like chooser
+  // resolves to a specific identity if one was already picked.
+  useEffect(() => {
+    setCurrentLeadId(getStoredLeadId());
+  }, []);
+
+  const chooseIdentity = (leadId: string) => {
+    setStoredLeadId(leadId);
+    setCurrentLeadId(leadId);
+  };
+  const switchIdentity = () => {
+    setStoredLeadId(null);
+    setCurrentLeadId(null);
+    setManualIntake(false);
+  };
 
   if (approvalWillId) {
     return <ClientFinalApproval willId={approvalWillId} onDone={() => setApprovalWillId(null)} />;
@@ -99,6 +136,26 @@ export function ClientJourney() {
     );
   }
 
+  // Every "who has something pending" list below is scoped to currentLeadId —
+  // a client only ever sees their own lead's items, never anyone else's.
+  const pendingApproval = currentLeadId
+    ? db.wills.filter((w) => w.status === "pending_client_approval" && w.lead_id === currentLeadId)
+    : [];
+  const pendingClarifications = currentLeadId
+    ? db.clarifications.filter((c) => {
+        if (c.status !== "sent") return false;
+        const w = db.wills.find((x) => x.id === c.will_id);
+        return w?.lead_id === currentLeadId;
+      })
+    : [];
+
+  // No identity chosen yet: this prototype has no real login, so — unlike a
+  // production app scoping by an authenticated session — we ask which demo
+  // client this browser is, rather than defaulting to showing anyone's data.
+  if (!currentLeadId && !manualIntake) {
+    return <IdentityChooser db={db} onChoose={chooseIdentity} onStartNew={() => setManualIntake(true)} />;
+  }
+
   // Derived directly from live store state on every render (not a one-time
   // effect) — the store seeds asynchronously on first mount, so deciding this
   // once at mount time would race the seed and could permanently skip the
@@ -106,7 +163,12 @@ export function ClientJourney() {
   if ((pendingApproval.length > 0 || pendingClarifications.length > 0) && !manualIntake) {
     return (
       <div className="mx-auto max-w-xl px-5 py-10">
-        <h2 className="font-serif text-2xl text-ink">Welcome back</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="font-serif text-2xl text-ink">Welcome back</h2>
+          <button className="text-xs text-slate underline" onClick={switchIdentity}>
+            Not you? Switch
+          </button>
+        </div>
 
         {pendingClarifications.length > 0 && (
           <>
@@ -172,6 +234,72 @@ export function ClientJourney() {
   return <IntakeWizard />;
 }
 
+/**
+ * There's no real login in this prototype. Rather than default to showing
+ * whoever's data happens to be pending (the bug this replaces), we ask which
+ * client this browser is — the same scoping a real login would give for
+ * free. Only lists identities that currently have something pending; picking
+ * one is the only way to see that lead's items.
+ */
+function IdentityChooser({
+  db,
+  onChoose,
+  onStartNew,
+}: {
+  db: DB;
+  onChoose: (leadId: string) => void;
+  onStartNew: () => void;
+}) {
+  const leadIdsWithClarifications = new Set(
+    db.clarifications
+      .filter((c) => c.status === "sent")
+      .map((c) => db.wills.find((w) => w.id === c.will_id)?.lead_id)
+      .filter((id): id is string => Boolean(id))
+  );
+  const leadIdsWithApproval = new Set(
+    db.wills.filter((w) => w.status === "pending_client_approval").map((w) => w.lead_id)
+  );
+  const candidateLeadIds = new Set([...leadIdsWithClarifications, ...leadIdsWithApproval]);
+  const candidates = db.leads.filter((l) => candidateLeadIds.has(l.id));
+
+  return (
+    <div className="mx-auto max-w-xl px-5 py-10">
+      <h2 className="font-serif text-2xl text-ink">Who are you?</h2>
+      <p className="mt-2 text-sm text-slate">
+        <MockLabel>Demo — no real login</MockLabel> Pick a client to see only their own
+        pending items. This mirrors how a real login would scope you to just your own will.
+      </p>
+      {candidates.length > 0 && (
+        <div className="mt-4 space-y-2">
+          {candidates.map((l) => {
+            const hasClarification = leadIdsWithClarifications.has(l.id);
+            const hasApproval = leadIdsWithApproval.has(l.id);
+            return (
+              <Card key={l.id} className="flex items-center justify-between p-4">
+                <div>
+                  <div className="font-medium text-ink">{l.full_name}</div>
+                  <div className="text-xs text-slate">
+                    {[
+                      hasClarification && "lawyer has a question",
+                      hasApproval && "awaiting your final approval",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </div>
+                </div>
+                <Button onClick={() => onChoose(l.id)}>Continue as {l.full_name.split(" ")[0]}</Button>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+      <Button className="mt-6" variant="secondary" onClick={onStartNew}>
+        I&apos;m a new client — start a will →
+      </Button>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The 5-step wizard
 // ---------------------------------------------------------------------------
@@ -190,6 +318,10 @@ function IntakeWizard() {
     const { lead, will, draft } = createIntake({ utm: { utm_source: "demo", utm_medium: "direct" } });
     setIds({ leadId: lead.id, willId: will.id });
     setDraft(draft);
+    // This browser is now "this" client going forward — so if this will
+    // later needs their final approval or a lawyer's clarification, the
+    // welcome-back picker resolves to them, not to whoever else's data.
+    setStoredLeadId(lead.id);
   }, []);
 
   const update = (patch: Partial<IntakeDraft>) => {

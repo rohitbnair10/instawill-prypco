@@ -3,7 +3,6 @@
 /** Compact metrics strip — every number derived from stored rows. */
 import { computeMetrics } from "@/lib/metrics";
 import { useDB } from "@/lib/store";
-import { Card } from "@/components/ui/primitives";
 
 function Stat({
   label,
@@ -15,10 +14,10 @@ function Stat({
   sub?: string;
 }) {
   return (
-    <div className="min-w-[120px] flex-1 px-3 py-2">
-      <div className="text-[11px] uppercase tracking-wide text-slate">{label}</div>
-      <div className="font-serif text-xl text-ink">{value}</div>
-      {sub && <div className="text-[11px] text-slate">{sub}</div>}
+    <div className="bg-paper-parchment px-3 py-2.5">
+      <div className="text-[10px] uppercase leading-tight tracking-wide text-slate">{label}</div>
+      <div className="mt-0.5 font-serif text-xl text-ink">{value}</div>
+      {sub && <div className="text-[10px] leading-tight text-slate">{sub}</div>}
     </div>
   );
 }
@@ -27,7 +26,7 @@ export function MetricsBar() {
   const db = useDB();
   const m = computeMetrics(db);
   return (
-    <Card className="mb-5 flex flex-wrap divide-x divide-hairline p-1">
+    <div className="mb-5 grid grid-cols-2 gap-px overflow-hidden rounded-xl2 border border-hairline bg-hairline sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
       <Stat
         label="Registered / month"
         value={String(m.registeredThisMonth)}
@@ -72,6 +71,6 @@ export function MetricsBar() {
         label="Recovery rate"
         value={m.recoveryRate != null ? `${Math.round(m.recoveryRate * 100)}%` : "—"}
       />
-    </Card>
+    </div>
   );
 }
