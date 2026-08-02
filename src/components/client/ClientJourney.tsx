@@ -28,6 +28,7 @@ import type {
 } from "@/lib/types";
 import { fallbackStructure } from "@/lib/structure";
 import { compareNames, runRules, type RuleResult } from "@/lib/rules";
+import { buildClientPrompts, clientSummaryLine } from "@/lib/clientPrompts";
 import type { StructureResult } from "@/lib/llm";
 import {
   commitStructuredWill,
@@ -720,7 +721,6 @@ function ConfirmStep({
 }) {
   const rules = runRules(structured, { identity, title_deed: null, ai_structured: result.ai_structured });
   const blocks = rules.filter((r) => r.severity === "block");
-  const warns = rules.filter((r) => r.severity === "warn");
 
   const setBeneficiary = (i: number, patch: Partial<StructuredWill["beneficiaries"][number]>) => {
     const next = { ...structured, beneficiaries: [...structured.beneficiaries] };
@@ -728,32 +728,43 @@ function ConfirmStep({
     setStructured(next);
   };
 
+  const prompts = buildClientPrompts(rules, structured);
+
   return (
     <div className="space-y-5">
-      <Card className={`p-4 ${result.source === "fallback" ? "border-amber/40 bg-amber/8" : "border-sage/30 bg-sage/6"}`}>
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          {result.source === "llm" ? (
-            <Pill tone="sage">LLM-structured</Pill>
-          ) : (
-            <MockLabel>Fallback — needs manual entry</MockLabel>
-          )}
+      {/* Warm, plain-language summary — the ONLY model text a client sees here.
+          confidence_notes, the source note, and lawyer diagnostics are never
+          rendered client-side (they're for the lawyer desk). */}
+      <Card className="border-sage/30 bg-sage/6 p-4">
+        <div className="text-xs font-semibold uppercase tracking-wide text-sage">
+          Here&apos;s what we understood
         </div>
-        {/* The actual reason the LLM call did/didn't run — distinct from the
-            generic distribution_summary below, so a missing key, an invalid
-            key, and a real API error each show their true cause instead of
-            all looking identical. */}
-        {result.note && (
-          <p className={`mt-1 text-xs ${result.source === "fallback" ? "text-amber" : "text-slate"}`}>
-            {result.note}
-          </p>
-        )}
-        <p className="mt-2 text-sm text-ink">{structured.distribution_summary}</p>
-        {structured.confidence_notes && (
-          <p className="mt-1 text-xs text-slate">
-            <strong>Model&apos;s notes:</strong> {structured.confidence_notes}
-          </p>
-        )}
+        <p className="mt-1.5 text-[15px] leading-relaxed text-ink">
+          {clientSummaryLine(structured, result.source)}
+        </p>
       </Card>
+
+      {/* Ambiguities become a short, calm "couple of things to confirm" — warm
+          questions the client can answer right here, not a list of errors. */}
+      {prompts.length > 0 && (
+        <Card className="p-4">
+          <div className="text-sm font-medium text-ink">A couple of things to confirm</div>
+          <p className="mt-0.5 text-xs text-slate">
+            We&apos;ve done the hard part — just help us finish these below.
+          </p>
+          <ul className="mt-3 space-y-2">
+            {prompts.map((p) => (
+              <li key={p.id} className="flex items-start gap-2 text-sm">
+                <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-sage" />
+                <span className="text-ink">
+                  {p.text}
+                  {p.required && <span className="text-slate"> · needed to continue</span>}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       <div>
         <h3 className="text-sm font-semibold text-ink">Beneficiaries</h3>
@@ -900,34 +911,23 @@ function ConfirmStep({
         </div>
       </div>
 
-      {warns.length > 0 && (
-        <div className="rounded-lg border border-hairline bg-white p-4">
-          <div className="text-sm font-medium text-ink">What the lawyer will weigh in on</div>
-          <ul className="mt-2 space-y-2">
-            {warns.map((w, i) => (
-              <li key={i} className="flex items-start gap-2 text-sm">
-                <SeverityBadge severity="warn" />
-                <span className="text-slate">{w.detail}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {/* No raw warns/blocks dump here — client-answerable gaps are the warm
+          prompts above; lawyer-only items stay with the lawyer. A single
+          reassuring line about the review to come. */}
+      <p className="text-center text-xs text-slate">
+        A qualified lawyer will review your will before anything is final.
+      </p>
 
-      {blocks.length > 0 && (
-        <div className="rounded-lg border border-clay/40 bg-clay/8 p-3 text-sm text-clay">
-          <div className="font-medium">Fix before continuing</div>
-          <ul className="mt-1 list-disc pl-5">
-            {blocks.map((b, i) => (
-              <li key={i}>{b.detail}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <Button className="w-full" disabled={blocks.length > 0 || confirmed} onClick={onConfirm}>
-        {confirmed ? "Confirmed ✓" : "This looks right — continue →"}
-      </Button>
+      <div className="space-y-1">
+        <Button className="w-full" disabled={blocks.length > 0 || confirmed} onClick={onConfirm}>
+          {confirmed ? "Confirmed ✓" : "This looks right — continue →"}
+        </Button>
+        {blocks.length > 0 && (
+          <p className="text-center text-xs text-slate">
+            Just add the details marked <em>needed to continue</em> above and you&apos;re set.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -1076,7 +1076,7 @@ function ReviewStep({
     ai_structured: aiStructured,
   });
   const blocks = rules.filter((r) => r.severity === "block");
-  const warns = rules.filter((r) => r.severity === "warn");
+  const prompts = buildClientPrompts(rules, structured);
 
   const isResident = identity.residency_status === "resident";
   const hasProperty = structured.assets.some((a) => a.type === "property");
@@ -1138,30 +1138,30 @@ function ReviewStep({
         </ul>
       </div>
 
-      {blocks.length > 0 && (
-        <div className="rounded-lg border border-clay/40 bg-clay/8 p-3 text-sm text-clay">
-          <div className="font-medium">Fix before submitting</div>
-          <ul className="mt-1 list-disc pl-5">
-            {blocks.map((b, i) => (
-              <li key={i}>{b.detail}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {warns.length > 0 && (
-        <div className="rounded-lg border border-hairline bg-white p-4">
-          <div className="text-sm font-medium text-ink">What the lawyer will weigh in on</div>
+      {prompts.length > 0 && (
+        <Card className="p-4">
+          <div className="text-sm font-medium text-ink">A couple of things to confirm first</div>
+          <p className="mt-0.5 text-xs text-slate">
+            Pop back a step to add these — we&apos;ve done the rest.
+          </p>
           <ul className="mt-3 space-y-2">
-            {warns.map((w, i) => (
-              <li key={i} className="flex items-start gap-2 text-sm">
-                <SeverityBadge severity="warn" />
-                <span className="text-slate">{w.detail}</span>
+            {prompts.map((p) => (
+              <li key={p.id} className="flex items-start gap-2 text-sm">
+                <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-sage" />
+                <span className="text-ink">
+                  {p.text}
+                  {p.required && <span className="text-slate"> · needed to submit</span>}
+                </span>
               </li>
             ))}
           </ul>
-        </div>
+        </Card>
       )}
+
+      {/* No raw lawyer items dumped here — one reassuring line instead. */}
+      <div className="rounded-lg border border-hairline bg-white p-4 text-center text-sm text-slate">
+        A qualified lawyer will personally review your will before anything is final.
+      </div>
 
       <div className="space-y-2">
         {docsPending ? (

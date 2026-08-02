@@ -126,13 +126,16 @@ export function ImageCapture<T>({
       )}
 
       {lastResult && (
+        // Badge only — the raw `note` (which can read "No ANTHROPIC_API_KEY
+        // set — simulated extraction") is an internal diagnostic and must
+        // never surface on a client screen. A short reassuring line instead.
         <div className="flex items-center gap-2 text-xs">
           {lastResult.source === "vision" ? (
             <Pill tone="sage">Read by Claude vision</Pill>
           ) : (
             <MockLabel>OCR simulated</MockLabel>
           )}
-          <span className="text-slate">{lastResult.note}</span>
+          <span className="text-slate">We&apos;ve captured the details from your document.</span>
         </div>
       )}
     </div>
