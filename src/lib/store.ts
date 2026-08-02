@@ -312,6 +312,8 @@ export function createIntake(seed: {
       client_approved_at: null,
       portal_ready_at: null,
       registered_at: null,
+      appointment_at: null,
+      payment_status: "pending",
     };
     const draft: IntakeDraft = {
       lead_id: lead.id,
@@ -528,7 +530,11 @@ export function recordDocument(willId: string, docType: DocType, patch: Partial<
  * are still pending it lands as documents_pending (async on docs, strict on
  * content) but either way becomes visible to the lawyer as in_review.
  */
-export function submitWill(willId: string, documentsPending: boolean) {
+export function submitWill(
+  willId: string,
+  documentsPending: boolean,
+  booking?: { appointmentAt: string }
+) {
   mutate((d) => {
     const will = d.wills.find((w) => w.id === willId);
     if (!will) return;
@@ -536,6 +542,11 @@ export function submitWill(willId: string, documentsPending: boolean) {
     will.submitted_at = ts;
     will.status = documentsPending ? "documents_pending" : "submitted";
     will.status = "in_review"; // content is complete; visible to the lawyer either way
+    // Appointment + payment are captured before the case reaches the lawyer.
+    if (booking) {
+      will.appointment_at = booking.appointmentAt;
+      will.payment_status = "paid";
+    }
     will.updated_at = ts;
     const lead = d.leads.find((l) => l.id === will.lead_id);
     if (lead) {
@@ -547,7 +558,11 @@ export function submitWill(willId: string, documentsPending: boolean) {
       lead_id: will.lead_id,
       will_id: willId,
       event_type: "will_submitted",
-      payload: { documents_pending: documentsPending },
+      payload: {
+        documents_pending: documentsPending,
+        appointment_at: booking?.appointmentAt ?? null,
+        paid: Boolean(booking),
+      },
       created_at: ts,
     });
   });
@@ -945,6 +960,8 @@ export function generatePortalPackage(willId: string) {
     if (existing) {
       existing.package_json = packageJson;
       existing.package_text = packageText;
+      existing.appointment_at = will.appointment_at ?? existing.appointment_at;
+      existing.payment_status = will.payment_status ?? existing.payment_status;
     } else {
       d.portal_submissions.push({
         id: uid(),
@@ -954,8 +971,9 @@ export function generatePortalPackage(willId: string) {
         method: "manual_ops",
         ops_user_id: null,
         submitted_at: null,
-        appointment_at: null,
-        payment_status: "pending",
+        // Appointment + payment were captured up front, before lawyer review.
+        appointment_at: will.appointment_at ?? null,
+        payment_status: will.payment_status ?? "pending",
         registration_outcome: "pending",
         rejection_reason: null,
       });

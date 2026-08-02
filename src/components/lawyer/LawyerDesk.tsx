@@ -13,7 +13,7 @@
  * `pending_client_approval` — the testator must re-confirm (§1B-bis) before the
  * portal package generates. The human is never bypassed, on either side.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   approveWill,
   checksForWill,
@@ -53,7 +53,7 @@ import type {
   WillDocument,
 } from "@/lib/types";
 import { LiveWill } from "@/components/LiveWill";
-import { Button, Card, Pill, Select, SeverityBadge, TextInput } from "@/components/ui/primitives";
+import { Button, Card, Pill, SeverityBadge, TextInput } from "@/components/ui/primitives";
 import { PortalPackageView } from "./PortalPackage";
 
 const LAWYER_ID = "user-lawyer-1";
@@ -101,6 +101,15 @@ export function LawyerDesk() {
     () => db.wills.filter((w) => POST_LAWYER_STATUSES.includes(w.status)),
     [db]
   );
+
+  // Pin the active case as soon as one exists. Without this, `activeWill` falls
+  // back to queue[0], and the queue is sorted by judgment load — so clearing
+  // the LAST item on a case drops its load to 0, re-sorts it away from the top,
+  // and yanks the lawyer to a different client mid-approval. Pinning keeps them
+  // on the same case; the Approve CTA simply unlocks in place.
+  useEffect(() => {
+    if (!selected && queue.length > 0) setSelected(queue[0].will.id);
+  }, [selected, queue]);
 
   const activeWill = selected ? willById(db, selected) : queue[0]?.will;
 
@@ -365,6 +374,7 @@ function CaseReview({ will }: { will: Will }) {
         <Card className="p-5">
           <LiveWill structured={structured} identity={will.identity} compact />
         </Card>
+        <DocumentsOnFile docs={docs} />
         {infos.length > 0 && (
           <Card className="p-4">
             <div className="text-xs font-semibold uppercase tracking-wide text-slate">For awareness</div>
@@ -420,6 +430,90 @@ function AwaitingClarificationBanner({ clarifications }: { clarifications: Clari
         Sent via {open.channel} · This case is off your active queue until they respond, then it
         returns here at the same item.
       </p>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Documents on file — lets the lawyer open what the client uploaded to verify
+// against the structured data (passport name, title-deed owner, Emirates ID).
+// ---------------------------------------------------------------------------
+
+const DOC_ON_FILE_LABEL: Record<string, string> = {
+  passport: "Passport",
+  emirates_id: "Emirates ID",
+  title_deed: "Title deed",
+  witness_passport: "Witness passport",
+  draft_will_pdf: "Draft will (PDF)",
+};
+
+function ocrSummary(ocr: Record<string, unknown> | null): string | null {
+  if (!ocr) return null;
+  const parts: string[] = [];
+  const pick = (k: string, label: string) => {
+    const v = ocr[k];
+    if (v !== undefined && v !== null && v !== "") parts.push(`${label}: ${String(v)}`);
+  };
+  pick("full_name", "Name");
+  pick("owner_name", "Owner");
+  pick("owner", "Owner");
+  pick("passport_number", "Passport #");
+  pick("address", "Address");
+  if (ocr["joint_owner"]) parts.push("Joint-owned");
+  return parts.length ? parts.join(" · ") : null;
+}
+
+function DocumentsOnFile({ docs }: { docs: WillDocument[] }) {
+  const visible = docs.filter((d) => d.doc_type !== "draft_will_pdf");
+  if (visible.length === 0) {
+    return (
+      <Card className="p-4">
+        <div className="text-xs font-semibold uppercase tracking-wide text-slate">Documents on file</div>
+        <p className="mt-2 text-sm text-slate">No documents uploaded yet.</p>
+      </Card>
+    );
+  }
+  return (
+    <Card className="p-4">
+      <div className="text-xs font-semibold uppercase tracking-wide text-slate">Documents on file</div>
+      <p className="mt-0.5 text-xs text-slate">Open to verify against the will content.</p>
+      <ul className="mt-2 space-y-2">
+        {visible.map((d) => {
+          const summary = ocrSummary(d.ocr_extracted);
+          const uploaded = d.status !== "pending";
+          return (
+            <li key={d.id} className="rounded-lg border border-hairline bg-white px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-medium text-ink">
+                  {DOC_ON_FILE_LABEL[d.doc_type] ?? d.doc_type.replace("_", " ")}
+                </span>
+                {uploaded ? (
+                  <Pill tone={d.status === "validated" ? "sage" : "slate"}>
+                    {d.status === "validated" ? "Verified" : "Uploaded"}
+                  </Pill>
+                ) : (
+                  <Pill tone="amber">Awaiting client</Pill>
+                )}
+              </div>
+              {summary && <p className="mt-1 text-xs text-slate">{summary}</p>}
+              {uploaded && (
+                d.file_url ? (
+                  <a
+                    href={d.file_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-1 inline-block text-xs font-medium text-slate underline hover:text-ink"
+                  >
+                    View document →
+                  </a>
+                ) : (
+                  <p className="mt-1 text-xs text-slate/70">Preview unavailable (stored securely).</p>
+                )
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </Card>
   );
 }
@@ -676,42 +770,53 @@ function ClarifyPanel({
   lead: Lead | undefined;
   onSent: () => void;
 }) {
-  const [mode, setMode] = useState<ClarificationMode>(
-    REUPLOAD_DOC_BY_CHECK[checkKey] ? "document_reupload" : "question"
-  );
-  const [docType, setDocType] = useState<DocType>(REUPLOAD_DOC_BY_CHECK[checkKey] ?? "passport");
-  const [question, setQuestion] = useState(`Can you confirm: ${checkDetail}`);
-  const [channel, setChannel] = useState<ClarificationChannel>(
-    lead?.preferred_channel === "whatsapp" ? "whatsapp" : "email"
-  );
-  const [drafting, setDrafting] = useState(false);
-  const [messageFinal, setMessageFinal] = useState<string | null>(null);
+  // Document-reupload is only meaningful for a couple of checks; everything
+  // else is a plain question. We pick the right default and don't make the
+  // lawyer choose unless it's genuinely a re-upload situation.
+  const reuploadDoc = REUPLOAD_DOC_BY_CHECK[checkKey];
+  const mode: ClarificationMode = reuploadDoc ? "document_reupload" : "question";
+  const question = `Can you confirm: ${checkDetail}`;
+  // Channel is chosen silently from the client's own preference — no picker.
+  const channel: ClarificationChannel =
+    lead?.preferred_channel === "whatsapp" ? "whatsapp" : "email";
+
+  const [message, setMessage] = useState<string>("");
+  const [drafting, setDrafting] = useState(true);
   const [sending, setSending] = useState(false);
 
-  const draftMessage = async () => {
-    setDrafting(true);
-    try {
-      const res = await fetch("/api/clarification-draft", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          clientName: lead?.full_name || "there",
-          mode,
-          question,
-          docType: mode === "document_reupload" ? docType : undefined,
-        }),
-      });
-      const data = (await res.json()) as { text: string };
-      setMessageFinal(data.text);
-    } catch {
-      setMessageFinal(`Hi — quick one from your InstaWill lawyer: ${question}`);
-    } finally {
-      setDrafting(false);
-    }
-  };
+  // Auto-draft the message as soon as the panel opens — the lawyer just edits
+  // and sends. No "draft" button, no channel/mode ceremony.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setDrafting(true);
+      try {
+        const res = await fetch("/api/clarification-draft", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            clientName: lead?.full_name || "there",
+            mode,
+            question,
+            docType: mode === "document_reupload" ? reuploadDoc : undefined,
+          }),
+        });
+        const data = (await res.json()) as { text: string };
+        if (!cancelled) setMessage(data.text);
+      } catch {
+        if (!cancelled) setMessage(`Hi — quick one from your InstaWill lawyer: ${question}`);
+      } finally {
+        if (!cancelled) setDrafting(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const send = () => {
-    if (!messageFinal || !lead) return;
+    if (!message.trim() || !lead) return;
     setSending(true);
     raiseClarification(
       willId,
@@ -719,79 +824,42 @@ function ClarifyPanel({
       LAWYER_ID,
       mode,
       question,
-      mode === "document_reupload" ? docType : null,
+      mode === "document_reupload" ? reuploadDoc ?? null : null,
       channel,
-      messageFinal,
-      messageFinal
+      message,
+      message
     );
     onSent();
   };
 
   return (
     <div className="mt-3 rounded-lg border border-hairline bg-paper-deep/30 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          variant={mode === "question" ? "sage" : "secondary"}
-          onClick={() => {
-            setMode("question");
-            setMessageFinal(null);
-          }}
-        >
-          Ask a question
-        </Button>
-        <Button
-          variant={mode === "document_reupload" ? "sage" : "secondary"}
-          onClick={() => {
-            setMode("document_reupload");
-            setMessageFinal(null);
-          }}
-        >
-          Request document re-upload
-        </Button>
-        <Select value={channel} onChange={(e) => setChannel(e.target.value as ClarificationChannel)} className="ml-auto max-w-[140px]">
-          <option value="email">Email</option>
-          <option value="whatsapp">WhatsApp</option>
-        </Select>
+      <div className="text-xs font-medium text-slate">
+        {mode === "document_reupload"
+          ? `Auto-drafted request to re-upload their ${(reuploadDoc ?? "document").replace("_", " ")} — edit if needed, then send:`
+          : "Auto-drafted question for the client — edit if needed, then send:"}
       </div>
-
-      {mode === "document_reupload" && (
-        <Select className="mt-2" value={docType} onChange={(e) => setDocType(e.target.value as DocType)}>
-          <option value="passport">Passport</option>
-          <option value="emirates_id">Emirates ID</option>
-          <option value="title_deed">Title deed</option>
-        </Select>
-      )}
-
-      <textarea
-        className="mt-2 w-full rounded-lg border border-hairline bg-white px-3 py-2 text-sm text-ink outline-none focus:border-slate focus:ring-2 focus:ring-slate/20"
-        rows={2}
-        value={question}
-        onChange={(e) => {
-          setQuestion(e.target.value);
-          setMessageFinal(null);
-        }}
-      />
-
-      {messageFinal === null ? (
-        <Button className="mt-2" variant="secondary" disabled={drafting || !question.trim()} onClick={draftMessage}>
-          {drafting ? "Drafting…" : "Draft message"}
-        </Button>
+      {drafting ? (
+        <div className="mt-2 flex items-center gap-2 rounded-lg border border-hairline bg-white px-3 py-3 text-sm text-slate">
+          <span className="h-3 w-3 animate-pulse rounded-full bg-slate/40" />
+          Drafting a message…
+        </div>
       ) : (
-        <>
-          <div className="mt-2 text-xs font-medium text-slate">
-            Message preview — LLM-drafted, edit before sending:
-          </div>
-          <textarea
-            className="mt-1 w-full rounded-lg border border-hairline bg-white px-3 py-2 text-sm text-ink outline-none focus:border-slate focus:ring-2 focus:ring-slate/20"
-            rows={4}
-            value={messageFinal}
-            onChange={(e) => setMessageFinal(e.target.value)}
-          />
-          <Button className="mt-2" variant="sage" disabled={sending || !lead} onClick={send}>
-            Send to client ({channel})
-          </Button>
-        </>
+        <textarea
+          className="mt-2 w-full rounded-lg border border-hairline bg-white px-3 py-2 text-sm text-ink outline-none focus:border-slate focus:ring-2 focus:ring-slate/20"
+          rows={4}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+        />
       )}
+      <div className="mt-2 flex items-center justify-between">
+        <span className="text-xs text-slate">
+          Sends via {channel} to the client&apos;s secure link.
+        </span>
+        <Button variant="sage" disabled={drafting || sending || !message.trim() || !lead} onClick={send}>
+          Send
+        </Button>
+      </div>
     </div>
   );
 }

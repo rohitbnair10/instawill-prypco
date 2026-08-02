@@ -103,6 +103,10 @@ function StalledIntakesTab() {
         (l) => INTAKE_STAGES.has(l.current_stage) && !recovered.has(l.id)
       )
       .map((l) => ({ lead: l, days: daysBetween(l.stage_updated_at) }))
+      // Day-0 leads aren't "stalled" yet — someone mid-session hasn't churned.
+      // Re-engagement is for people who've genuinely gone quiet (≥1 day), so
+      // we don't chase (or annoy) users who just started today.
+      .filter((x) => x.days >= 1)
       .sort((a, b) => b.days - a.days);
   }, [db]);
 
@@ -206,6 +210,26 @@ function LeadDetail({ lead }: { lead: Lead }) {
           </div>
           {lead.assigned_agent_id && (
             <Pill tone="sage">Agent assigned</Pill>
+          )}
+        </div>
+
+        {/* contact — so an agent can call/email to convert */}
+        <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
+          {lead.phone ? (
+            <a href={`tel:${lead.phone.replace(/\s/g, "")}`} className="flex items-center gap-1.5 text-ink hover:underline">
+              <span className="text-slate">📞</span>
+              {lead.phone}
+            </a>
+          ) : (
+            <span className="text-slate">No phone on file</span>
+          )}
+          {lead.email ? (
+            <a href={`mailto:${lead.email}`} className="flex items-center gap-1.5 text-ink hover:underline">
+              <span className="text-slate">✉️</span>
+              {lead.email}
+            </a>
+          ) : (
+            <span className="text-slate">No email on file</span>
           )}
         </div>
 
@@ -364,6 +388,20 @@ function ClarificationRow({ clarification }: { clarification: Clarification }) {
             <Pill tone="slate">via {clarification.channel}</Pill>
           </div>
           <p className="mt-1 text-sm text-slate">{clarification.question}</p>
+          {lead && (lead.phone || lead.email) && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs">
+              {lead.phone && (
+                <a href={`tel:${lead.phone.replace(/\s/g, "")}`} className="text-slate hover:text-ink hover:underline">
+                  📞 {lead.phone}
+                </a>
+              )}
+              {lead.email && (
+                <a href={`mailto:${lead.email}`} className="text-slate hover:text-ink hover:underline">
+                  ✉️ {lead.email}
+                </a>
+              )}
+            </div>
+          )}
         </div>
         <div className="text-right">
           <div className="text-xs text-slate">Waiting</div>

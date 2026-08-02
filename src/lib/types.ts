@@ -204,6 +204,14 @@ export interface Will {
   client_approved_at?: string | null;
   portal_ready_at?: string | null;
   registered_at?: string | null;
+  /**
+   * Registration appointment + payment are collected from the client UP FRONT,
+   * before the will enters the lawyer queue — a paying, committed client with a
+   * booked slot is what the lawyer's time is spent on. Null/`pending` until the
+   * client books and pays on the review step.
+   */
+  appointment_at?: string | null;
+  payment_status?: PaymentStatus;
 }
 
 export interface Beneficiary {

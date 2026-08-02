@@ -85,11 +85,16 @@ export function buildPortalPackage(
       })),
     step_9_appointment: {
       status: "client_to_book",
-      note: "Client books the DIFC WPR appointment (stays with the client).",
+      note: will.appointment_at
+        ? `Appointment already booked by the client for ${new Date(will.appointment_at).toLocaleString()} — confirm the DIFC WPR slot.`
+        : "Client books the DIFC WPR appointment (stays with the client).",
     },
     step_10_payment: {
       status: "client_to_pay",
-      note: "Client pays the DIFC registration fee (stays with the client).",
+      note:
+        will.payment_status === "paid"
+          ? "Registration fee already paid by the client up front — no collection needed."
+          : "Client pays the DIFC registration fee (stays with the client).",
     },
   };
 }

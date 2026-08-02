@@ -425,8 +425,8 @@ function IntakeWizard() {
                 structured={editable}
                 aiStructured={result?.ai_structured ?? false}
                 submitted={submitted}
-                onSubmit={(documentsPending) => {
-                  submitWill(ids.willId, documentsPending);
+                onSubmit={(documentsPending, booking) => {
+                  submitWill(ids.willId, documentsPending, booking);
                   setSubmitted(true);
                 }}
               />
@@ -1051,6 +1051,37 @@ function DocCaptureRow({
 // Step 4 — Review & submit
 // ---------------------------------------------------------------------------
 
+/** The InstaWill drafting + DIFC registration fee shown at checkout (demo). */
+const SERVICE_FEE_AED = 1500;
+
+/**
+ * A handful of upcoming registration-appointment slots. Real scheduling would
+ * come from the DIFC WPR calendar; for the prototype we generate the next few
+ * weekday mornings/afternoons so the client can pick a concrete time up front.
+ */
+function appointmentSlots(count = 6): { iso: string; label: string }[] {
+  const slots: { iso: string; label: string }[] = [];
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+  const times = [10, 14]; // 10:00 and 14:00
+  while (slots.length < count) {
+    cursor.setDate(cursor.getDate() + 1);
+    const day = cursor.getDay();
+    if (day === 0 || day === 5 || day === 6) continue; // skip Fri/Sat/Sun (UAE weekend)
+    for (const h of times) {
+      if (slots.length >= count) break;
+      const d = new Date(cursor);
+      d.setHours(h, 0, 0, 0);
+      slots.push({
+        iso: d.toISOString(),
+        label: d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }) +
+          ` · ${h > 12 ? h - 12 : h}:00 ${h >= 12 ? "PM" : "AM"}`,
+      });
+    }
+  }
+  return slots;
+}
+
 function ReviewStep({
   draft,
   identity,
@@ -1064,8 +1095,12 @@ function ReviewStep({
   structured: StructuredWill | null;
   aiStructured: boolean;
   submitted: boolean;
-  onSubmit: (documentsPending: boolean) => void;
+  onSubmit: (documentsPending: boolean, booking: { appointmentAt: string }) => void;
 }) {
+  const slots = useMemo(() => appointmentSlots(), []);
+  const [appointmentAt, setAppointmentAt] = useState<string | null>(null);
+  const [paid, setPaid] = useState(false);
+
   if (!structured) return null;
 
   const rules = runRules(structured, {
@@ -1114,6 +1149,11 @@ function ReviewStep({
             ? "Your will's content is locked in. We'll email a secure link for the outstanding documents — the lawyer can review the content now."
             : "Your will is complete and queued for lawyer review."}
         </p>
+        {appointmentAt && (
+          <p className="mt-2 text-sm text-sage">
+            Appointment booked for {new Date(appointmentAt).toLocaleString()} · Payment received.
+          </p>
+        )}
         <p className="mt-3 text-xs text-slate">
           Switch to the <strong>Lawyer review</strong> tab to see it arrive. After the
           lawyer approves, you&apos;ll return here for final approval before registration.
@@ -1158,27 +1198,106 @@ function ReviewStep({
         </Card>
       )}
 
+      {/* Appointment booking — captured up front, before the lawyer's time is
+          spent. A committed client with a booked slot is what gets reviewed. */}
+      <Card className="p-4">
+        <div className="text-sm font-medium text-ink">Book your registration appointment</div>
+        <p className="mt-0.5 text-xs text-slate">
+          Pick a slot for your DIFC Wills Registry appointment. You can reschedule later
+          if you need to.
+        </p>
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {slots.map((s) => {
+            const active = s.iso === appointmentAt;
+            return (
+              <button
+                key={s.iso}
+                type="button"
+                onClick={() => setAppointmentAt(s.iso)}
+                className={`rounded-lg border px-3 py-2 text-xs transition-colors ${
+                  active
+                    ? "border-sage bg-sage/10 font-medium text-ink"
+                    : "border-hairline bg-white text-slate hover:border-slate"
+                }`}
+              >
+                {s.label}
+              </button>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* Payment — simulated checkout. Real integration would use a PSP. */}
+      <Card className="p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-sm font-medium text-ink">Payment</div>
+            <p className="mt-0.5 text-xs text-slate">
+              InstaWill drafting + DIFC registration
+            </p>
+          </div>
+          <div className="text-right">
+            <div className="font-serif text-lg text-ink">AED {SERVICE_FEE_AED.toLocaleString()}</div>
+            {paid && <Pill tone="sage">Paid ✓</Pill>}
+          </div>
+        </div>
+        {!paid && (
+          <Button
+            className="mt-3 w-full"
+            variant="secondary"
+            disabled={!appointmentAt}
+            onClick={() => setPaid(true)}
+          >
+            {appointmentAt ? `Pay AED ${SERVICE_FEE_AED.toLocaleString()} (demo)` : "Pick an appointment slot first"}
+          </Button>
+        )}
+      </Card>
+
       {/* No raw lawyer items dumped here — one reassuring line instead. */}
       <div className="rounded-lg border border-hairline bg-white p-4 text-center text-sm text-slate">
         A qualified lawyer will personally review your will before anything is final.
       </div>
 
       <div className="space-y-2">
-        {docsPending ? (
-          <>
-            <Button className="w-full" disabled={blocks.length > 0} onClick={() => onSubmit(true)}>
-              Submit now, finish documents later →
-            </Button>
-            <p className="text-center text-xs text-slate">
-              Sends to the lawyer queue in a <em>documents-pending</em> state. Documents
-              never block submission.
-            </p>
-          </>
-        ) : (
-          <Button className="w-full" variant="sage" disabled={blocks.length > 0} onClick={() => onSubmit(false)}>
-            Submit for lawyer review →
-          </Button>
-        )}
+        {(() => {
+          const ready = blocks.length === 0 && Boolean(appointmentAt) && paid;
+          const gateText = blocks.length > 0
+            ? null
+            : !appointmentAt
+            ? "Book an appointment slot above to continue."
+            : !paid
+            ? "Complete payment above to continue."
+            : null;
+          return (
+            <>
+              {docsPending ? (
+                <Button
+                  className="w-full"
+                  disabled={!ready}
+                  onClick={() => onSubmit(true, { appointmentAt: appointmentAt! })}
+                >
+                  Submit now, finish documents later →
+                </Button>
+              ) : (
+                <Button
+                  className="w-full"
+                  variant="sage"
+                  disabled={!ready}
+                  onClick={() => onSubmit(false, { appointmentAt: appointmentAt! })}
+                >
+                  Confirm &amp; submit for lawyer review →
+                </Button>
+              )}
+              {gateText && <p className="text-center text-xs text-slate">{gateText}</p>}
+              {docsPending && ready && (
+                <p className="text-center text-xs text-slate">
+                  Sends to the lawyer queue in a <em>documents-pending</em> state. Documents
+                  never block submission.
+                </p>
+              )}
+            </>
+          );
+        })()}
       </div>
     </div>
   );
