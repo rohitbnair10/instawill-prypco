@@ -17,8 +17,12 @@ const emirate = z.enum(["dubai", "rak", "abu_dhabi", "other", "n_a"]);
 const assetType = z.enum(["property", "bank_account", "business_shares", "other"]);
 const residency = z.enum(["resident", "non_resident", "unknown"]);
 
+// name is intentionally NOT min(1): the system prompt explicitly tells the
+// model to leave executor.name empty (never invent one) when the client's
+// wishes text didn't name an executor — requiring non-empty here would reject
+// that correct, honest response and wrongly trigger the fallback path.
 const personRef = z.object({
-  name: z.string().min(1),
+  name: z.string(),
   relationship: z.string(),
 });
 
