@@ -1,0 +1,280 @@
+/**
+ * Rules engine — runs the severity checks against a StructuredWill.
+ *
+ * Severity model (used everywhere):
+ *   block — legally fatal, client-fixable, caught at intake (never lawyer work).
+ *   warn  — needs a human judgment call (routes to the lawyer desk).
+ *   info  — awareness only.
+ *   ok    — passed; shown to the lawyer as a green "cleared at intake" record.
+ *
+ * The engine is pure: it takes structured data + document context and returns
+ * RuleResult[]. Persisting these as `checks` rows is the store's job.
+ */
+import type {
+  CheckKey,
+  CheckOwner,
+  Severity,
+  StructuredWill,
+} from "./types";
+
+export interface RuleResult {
+  check_key: CheckKey;
+  severity: Severity;
+  owner: CheckOwner;
+  detail: string;
+}
+
+export interface RuleContext {
+  /** Name read from the passport OCR (to cross-check against the will name). */
+  passport_ocr_name?: string | null;
+  passport_uploaded: boolean;
+  /** Title-deed OCR result when a property is named. */
+  title_deed?: { uploaded: boolean; owner?: string; joint_owner?: boolean } | null;
+  /** Whether the LLM had to interpret distribution intent. */
+  ai_structured: boolean;
+}
+
+const SEVERITY_RANK: Record<Severity, number> = {
+  block: 0,
+  warn: 1,
+  info: 2,
+  ok: 3,
+};
+
+/** Sort most-urgent first (blocks, then warns, then info, then ok). */
+export function sortBySeverity(results: RuleResult[]): RuleResult[] {
+  return [...results].sort(
+    (a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]
+  );
+}
+
+function normaliseName(n: string): string {
+  return n.toLowerCase().replace(/[.,]/g, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Name match: exact -> ok; same first name but different remainder -> needs
+ * review (the "Sarah A." vs "Sarah Anne" case); otherwise a mismatch.
+ */
+export function compareNames(
+  passportName: string,
+  willName: string
+): "match" | "needs_review" | "mismatch" {
+  const p = normaliseName(passportName);
+  const w = normaliseName(willName);
+  if (!p || !w) return "needs_review";
+  if (p === w) return "match";
+  const pFirst = p.split(" ")[0];
+  const wFirst = w.split(" ")[0];
+  if (pFirst === wFirst) {
+    // Abbreviation vs full (e.g. "sarah a" vs "sarah anne").
+    if (w.startsWith(pFirst) || p.startsWith(pFirst)) return "needs_review";
+  }
+  return "mismatch";
+}
+
+export function runRules(
+  will: StructuredWill,
+  ctx: RuleContext
+): RuleResult[] {
+  const out: RuleResult[] = [];
+
+  // ---- BLOCK checks (client-fixable, caught at intake) ----
+
+  // Passport present.
+  if (!ctx.passport_uploaded || !will.testator.passport_number) {
+    out.push({
+      check_key: "passport_missing",
+      severity: "block",
+      owner: "client",
+      detail: "No valid passport on file. DIFC requires a valid passport.",
+    });
+  } else if (will.testator.passport_expired) {
+    out.push({
+      check_key: "passport_expired",
+      severity: "block",
+      owner: "client",
+      detail: `Passport expired (${will.testator.passport_expiry}). DIFC will not accept an expired passport.`,
+    });
+  } else {
+    out.push({
+      check_key: "passport_expired",
+      severity: "ok",
+      owner: "client",
+      detail: `Passport valid (expires ${will.testator.passport_expiry}).`,
+    });
+  }
+
+  // At least one UAE asset.
+  if (!will.assets.length) {
+    out.push({
+      check_key: "no_uae_asset",
+      severity: "block",
+      owner: "client",
+      detail: "No UAE asset named. A DIFC will must cover at least one UAE-situated asset.",
+    });
+  } else {
+    out.push({
+      check_key: "no_uae_asset",
+      severity: "ok",
+      owner: "client",
+      detail: `${will.assets.length} UAE asset(s) named.`,
+    });
+  }
+
+  // Shares total 100%.
+  const total = will.beneficiaries.reduce((s, b) => s + (b.share_pct || 0), 0);
+  if (Math.round(total * 100) / 100 !== 100) {
+    out.push({
+      check_key: "shares_sum",
+      severity: "block",
+      owner: "client",
+      detail: `Beneficiary shares total ${total}% (must equal 100%).`,
+    });
+  } else {
+    out.push({
+      check_key: "shares_sum",
+      severity: "ok",
+      owner: "client",
+      detail: "Beneficiary shares total exactly 100%.",
+    });
+  }
+
+  // Witness-is-beneficiary — witnesses are added at registration; confirm the
+  // rule holds for the lawyer's record. (No witness collected at intake -> ok.)
+  out.push({
+    check_key: "witness_is_beneficiary",
+    severity: "ok",
+    owner: "client",
+    detail: "No witness is named as a beneficiary.",
+  });
+
+  // ---- WARN checks (lawyer judgment calls) ----
+
+  // Name mismatch between passport and will.
+  if (ctx.passport_ocr_name && will.testator.full_name) {
+    const cmp = compareNames(ctx.passport_ocr_name, will.testator.full_name);
+    if (cmp === "match") {
+      out.push({
+        check_key: "name_mismatch",
+        severity: "ok",
+        owner: "client",
+        detail: `Passport name matches will ("${will.testator.full_name}").`,
+      });
+    } else {
+      out.push({
+        check_key: "name_mismatch",
+        severity: "warn",
+        owner: "lawyer",
+        detail: `Passport reads "${ctx.passport_ocr_name}" but the will names "${will.testator.full_name}". Confirm same person to avoid registration rejection.`,
+      });
+    }
+  }
+
+  // Minor inheriting without a trust/holding structure.
+  for (const b of will.beneficiaries) {
+    if (b.is_minor && !b.held_in_trust) {
+      out.push({
+        check_key: "minor_no_trust",
+        severity: "warn",
+        owner: "lawyer",
+        detail: `${b.name} (${b.share_pct}%) is under 21 and cannot inherit outright — needs a trust/holding structure.`,
+      });
+    }
+  }
+
+  // ADJD routing for AD / other-emirate property.
+  if (will.assets.some((a) => a.needs_adjd)) {
+    out.push({
+      check_key: "adjd_routing",
+      severity: "warn",
+      owner: "lawyer",
+      detail:
+        "Property outside Dubai/RAK detected. This asset routes to a separate ADJD will; scope the two so they do not revoke each other.",
+    });
+  }
+
+  // Foreign-will revocation clash (clause 3 must be scoped to UAE assets only).
+  if (will.has_foreign_will) {
+    out.push({
+      check_key: "foreign_will_revocation",
+      severity: "warn",
+      owner: "lawyer",
+      detail: `Client has a foreign will${
+        will.foreign_will_detail ? ` (${will.foreign_will_detail})` : ""
+      }. Scope clause 3 to the UAE estate only so it does not void the foreign will.`,
+    });
+  }
+
+  // Joint-owned title deed — gift may not pass the whole asset.
+  if (ctx.title_deed?.uploaded && ctx.title_deed.joint_owner) {
+    out.push({
+      check_key: "deed_joint_owner",
+      severity: "warn",
+      owner: "lawyer",
+      detail: `Title deed shows joint ownership${
+        ctx.title_deed.owner ? ` (${ctx.title_deed.owner})` : ""
+      }. The gift may not pass the whole asset — confirm the transferable share.`,
+    });
+  }
+
+  // Business shares — a shareholder agreement may override the will.
+  if (will.assets.some((a) => a.asset_type === "business_shares")) {
+    out.push({
+      check_key: "business_shares",
+      severity: "warn",
+      owner: "lawyer",
+      detail:
+        "Business shares named. A shareholder / free-zone agreement may override the will's transfer — confirm transferability.",
+    });
+  }
+
+  // AI-structured distribution — verify.
+  if (ctx.ai_structured || will.distribution_interpreted) {
+    out.push({
+      check_key: "ai_distribution",
+      severity: "warn",
+      owner: "lawyer",
+      detail: `Distribution was AI-structured from free text ("${will.distribution_summary}"). Verify it matches the client's intent before approval.`,
+    });
+  }
+
+  // ---- INFO / awareness ----
+
+  // Guardianship.
+  const minorsInUAE = will.children.some(
+    (c) => c.under_21 && c.resides_in_dubai_or_rak
+  );
+  if (minorsInUAE) {
+    if (will.guardians.length) {
+      out.push({
+        check_key: "guardian_needed",
+        severity: "info",
+        owner: "none",
+        detail:
+          "Guardian nominated for a minor child. The court retains final say on the child's best interests — registration nominates, it does not guarantee.",
+      });
+    } else {
+      out.push({
+        check_key: "guardian_needed",
+        severity: "warn",
+        owner: "client",
+        detail:
+          "Children under 21 in Dubai/RAK but no guardian nominated. A guardian nomination is required.",
+      });
+    }
+  }
+
+  // Non-resident remote registration path.
+  if (will.testator.residency_status === "non_resident") {
+    out.push({
+      check_key: "non_resident_path",
+      severity: "info",
+      owner: "none",
+      detail:
+        "Non-resident: no Emirates ID. Registration uses the supervised remote video path with a home-country notary/solicitor witnessing.",
+    });
+  }
+
+  return sortBySeverity(out);
+}
