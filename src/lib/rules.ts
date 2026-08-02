@@ -142,6 +142,41 @@ export function runRules(will: StructuredWill, ctx: RuleContext): RuleResult[] {
     });
   }
 
+  // Executor named. A DIFC will MUST appoint an executor (Schedule 1 clause 4).
+  // The model is instructed to leave this empty rather than invent a name when
+  // the client's free text didn't mention one — so an empty executor here means
+  // the client genuinely didn't provide a mandatory field, and must add one
+  // before the will can go to a lawyer. Client-fixable, so caught at intake.
+  if (!will.executor.name?.trim()) {
+    out.push({
+      check_key: "executor_missing",
+      severity: "block",
+      owner: "client",
+      detail:
+        "No executor named. A DIFC will must appoint an executor to administer your estate — add one before submitting.",
+    });
+  } else {
+    out.push({
+      check_key: "executor_missing",
+      severity: "ok",
+      owner: "client",
+      detail: `Executor appointed (${will.executor.name}).`,
+    });
+  }
+
+  // Every beneficiary needs a name — a share with no named recipient is not a
+  // registrable gift. Guards against a partial LLM extraction (or a client
+  // deleting a name on the confirm screen) reaching the lawyer.
+  const nameless = will.beneficiaries.filter((b) => !b.name?.trim());
+  if (nameless.length) {
+    out.push({
+      check_key: "beneficiary_incomplete",
+      severity: "block",
+      owner: "client",
+      detail: `${nameless.length} beneficiary(ies) have a share but no name — name every beneficiary before submitting.`,
+    });
+  }
+
   // Minor beneficiary with no trust/holding structure. This is a hard
   // registration blocker (a minor cannot inherit outright) — but only a
   // LAWYER can pick the mechanism (bare trust vs. will trust), so it is

@@ -106,6 +106,8 @@ export type CheckKey =
   | "no_uae_asset"
   | "passport_expired"
   | "passport_missing"
+  | "executor_missing"
+  | "beneficiary_incomplete"
   | "minor_no_trust"
   | "duplicate_beneficiary"
   | "adjd_routing"
