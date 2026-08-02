@@ -738,6 +738,15 @@ function ConfirmStep({
             <MockLabel>Fallback — needs manual entry</MockLabel>
           )}
         </div>
+        {/* The actual reason the LLM call did/didn't run — distinct from the
+            generic distribution_summary below, so a missing key, an invalid
+            key, and a real API error each show their true cause instead of
+            all looking identical. */}
+        {result.note && (
+          <p className={`mt-1 text-xs ${result.source === "fallback" ? "text-amber" : "text-slate"}`}>
+            {result.note}
+          </p>
+        )}
         <p className="mt-2 text-sm text-ink">{structured.distribution_summary}</p>
         {structured.confidence_notes && (
           <p className="mt-1 text-xs text-slate">
