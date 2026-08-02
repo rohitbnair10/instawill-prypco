@@ -18,7 +18,7 @@ import type {
   StructuredWill,
 } from "@/lib/types";
 import { deterministicStructure } from "@/lib/structure";
-import { runRules, type RuleResult } from "@/lib/rules";
+import { compareNames, runRules, type RuleResult } from "@/lib/rules";
 import type { StructureResult } from "@/lib/llm";
 import {
   commitStructuredWill,
@@ -31,6 +31,12 @@ import {
   upsertDocument,
 } from "@/lib/store";
 import { LiveWill } from "@/components/LiveWill";
+import { ImageCapture } from "@/components/ui/ImageCapture";
+import type {
+  EmiratesIdExtract,
+  PassportExtract,
+  TitleDeedExtract,
+} from "@/lib/ocrSchema";
 import {
   Button,
   Card,
@@ -255,21 +261,29 @@ function IdentityStep({
   draft: IntakeDraft;
   update: (p: Partial<IntakeDraft>) => void;
 }) {
-  const scan = (expired: boolean) => {
-    const expiry = expired ? "2023-04-01" : futureDate(6);
-    const ocr = {
-      full_name: "Sarah Anne Whitfield",
-      passport_number: "561234789",
-      passport_expiry: expiry,
-    };
+  const applyExtraction = (extracted: PassportExtract) => {
     update({
       passport: {
         uploaded: true,
-        ocr,
-        full_name: ocr.full_name,
-        passport_number: ocr.passport_number,
-        passport_expiry: expiry,
+        ocr: {
+          full_name: extracted.full_name,
+          passport_number: extracted.passport_number,
+          passport_expiry: extracted.passport_expiry,
+        },
+        full_name: extracted.full_name,
+        passport_number: extracted.passport_number,
+        passport_expiry: extracted.passport_expiry,
       },
+    });
+  };
+
+  const scanDemo = (expired: boolean) => {
+    const expiry = expired ? "2023-04-01" : futureDate(6);
+    applyExtraction({
+      full_name: "Sarah Anne Whitfield",
+      passport_number: "561234789",
+      passport_expiry: expiry,
+      legible: true,
     });
   };
 
@@ -287,20 +301,23 @@ function IdentityStep({
 
       {!draft.passport.uploaded ? (
         <Card className="p-5">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="font-medium text-ink">Scan your passport</div>
-              <div className="text-xs text-slate">
-                <MockLabel>OCR simulated</MockLabel> returns structured fields.
-              </div>
-            </div>
+          <div className="font-medium text-ink">Scan your passport</div>
+          <p className="mt-1 text-xs text-slate">
+            Photo page only. Read by Claude vision, then you review and correct.
+          </p>
+          <div className="mt-4">
+            <ImageCapture<PassportExtract>
+              docType="passport"
+              label="passport"
+              onExtracted={({ extracted }) => applyExtraction(extracted)}
+            />
           </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Button onClick={() => scan(false)}>Scan passport</Button>
-            <Button variant="secondary" onClick={() => scan(true)}>
-              Scan expired passport (demo)
-            </Button>
-          </div>
+          <button
+            className="mt-3 text-xs text-slate underline"
+            onClick={() => scanDemo(false)}
+          >
+            No document handy? Use a demo passport
+          </button>
         </Card>
       ) : (
         <>
@@ -962,55 +979,73 @@ function DocumentsStep({
       </div>
 
       {isResident && (
-        <DocRow
+        <DocCaptureRow
           title="Emirates ID"
           subtitle="Reads your address and cross-checks the name against your passport."
           uploaded={draft.emirates_id.uploaded}
-          onUpload={() => {
-            update({
-              emirates_id: {
-                uploaded: true,
-                ocr: {
-                  full_name: draft.passport.full_name,
-                  address: "Villa 12, Emirates Hills, Dubai",
+        >
+          <ImageCapture<EmiratesIdExtract>
+            docType="emirates_id"
+            label="Emirates ID"
+            onExtracted={({ extracted }) => {
+              update({
+                emirates_id: {
+                  uploaded: true,
+                  ocr: {
+                    full_name: extracted.full_name,
+                    address: extracted.address || "",
+                  },
+                  number: extracted.id_number,
                 },
-                number: "784-1988-1234567-1",
-              },
-            });
-            upsertDocument(willId, {
-              doc_type: "emirates_id",
-              status: "validated",
-              ocr_extracted: { address: "Villa 12, Emirates Hills, Dubai" },
-              match_result: "match",
-              uploaded_at: new Date().toISOString(),
-              validated_at: new Date().toISOString(),
-            });
-          }}
-        />
+              });
+              const match =
+                compareNames(extracted.full_name, draft.passport.full_name) ===
+                "match"
+                  ? "match"
+                  : "needs_review";
+              upsertDocument(willId, {
+                doc_type: "emirates_id",
+                status: "validated",
+                ocr_extracted: { ...extracted },
+                match_result: match,
+                uploaded_at: new Date().toISOString(),
+                validated_at: new Date().toISOString(),
+              });
+            }}
+          />
+        </DocCaptureRow>
       )}
 
       {hasProperty && (
-        <DocRow
+        <DocCaptureRow
           title="Title deed"
           subtitle="Reads the owner and flags joint ownership (the gift may not pass the whole asset)."
           uploaded={draft.title_deed.uploaded}
-          onUpload={() => {
-            update({
-              title_deed: {
-                uploaded: true,
-                ocr: { owner: draft.passport.full_name, joint_owner: false },
-              },
-            });
-            upsertDocument(willId, {
-              doc_type: "title_deed",
-              status: "validated",
-              ocr_extracted: { owner: draft.passport.full_name, joint: false },
-              match_result: "match",
-              uploaded_at: new Date().toISOString(),
-              validated_at: new Date().toISOString(),
-            });
-          }}
-        />
+        >
+          <ImageCapture<TitleDeedExtract>
+            docType="title_deed"
+            label="title deed"
+            onExtracted={({ extracted }) => {
+              update({
+                title_deed: {
+                  uploaded: true,
+                  ocr: {
+                    owner: extracted.owner_name,
+                    joint_owner: extracted.joint_owner,
+                  },
+                },
+              });
+              upsertDocument(willId, {
+                doc_type: "title_deed",
+                status: "validated",
+                ocr_extracted: { ...extracted },
+                match_result: extracted.joint_owner ? "needs_review" : "match",
+                uploaded_at: new Date().toISOString(),
+                validated_at: new Date().toISOString(),
+              });
+            }}
+          />
+        </DocCaptureRow>
       )}
 
       {!isResident && !hasProperty && (
@@ -1023,36 +1058,29 @@ function DocumentsStep({
   );
 }
 
-function DocRow({
+function DocCaptureRow({
   title,
   subtitle,
   uploaded,
-  onUpload,
+  children,
 }: {
   title: string;
   subtitle: string;
   uploaded: boolean;
-  onUpload: () => void;
+  children: React.ReactNode;
 }) {
   return (
-    <Card className="flex items-center justify-between gap-3 p-4">
-      <div>
-        <div className="flex items-center gap-2">
-          <span className="font-medium text-ink">{title}</span>
-          {uploaded ? (
-            <Pill tone="sage">Uploaded</Pill>
-          ) : (
-            <Pill tone="amber">Upload later ok</Pill>
-          )}
-          <MockLabel>OCR simulated</MockLabel>
-        </div>
-        <p className="mt-1 text-xs text-slate">{subtitle}</p>
+    <Card className="p-4">
+      <div className="flex items-center gap-2">
+        <span className="font-medium text-ink">{title}</span>
+        {uploaded ? (
+          <Pill tone="sage">Uploaded</Pill>
+        ) : (
+          <Pill tone="amber">Upload later ok</Pill>
+        )}
       </div>
-      {!uploaded && (
-        <Button variant="secondary" onClick={onUpload}>
-          Upload
-        </Button>
-      )}
+      <p className="mt-1 text-xs text-slate">{subtitle}</p>
+      {!uploaded && <div className="mt-3">{children}</div>}
     </Card>
   );
 }
