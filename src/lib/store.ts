@@ -1,5 +1,5 @@
 /**
- * Data layer.
+ * Data layer — v2.
  *
  * Source of truth for production is Supabase/Postgres (supabase/schema.sql).
  * For a zero-backend, genuinely-working prototype this is a localStorage-backed
@@ -7,7 +7,10 @@
  * timestamped row AND an `events` entry — the timing data is the whole business
  * case, so we capture it from day one rather than reconstructing it later.
  *
- * The store is a tiny external store (useSyncExternalStore-compatible).
+ * v2 flow this encodes: client submits -> lawyer reviews/amends/approves ->
+ * CLIENT reviews final draft + lawyer changes -> client approves -> portal
+ * package -> appointment booked -> registration. Three approvals for three
+ * things: the LLM structures, the lawyer validates, the client consents.
  */
 "use client";
 
@@ -16,11 +19,14 @@ import type {
   Asset,
   Beneficiary,
   Check,
+  DocType,
   EventRow,
   Executor,
+  Identity,
   IntakeDraft,
   Lead,
   LeadStage,
+  PortalSubmission,
   Reminder,
   ReminderType,
   ReviewItem,
@@ -33,8 +39,8 @@ import type {
   WillDocument,
   WillStatus,
 } from "./types";
-import type { RuleResult } from "./rules";
-import type { PortalSubmission } from "./types";
+import { runRules, type RuleContext, type RuleResult } from "./rules";
+import { buildPortalPackage, buildPortalPackageText } from "./portal";
 
 export interface DB {
   leads: Lead[];
@@ -54,7 +60,7 @@ export interface DB {
   _seeded: boolean;
 }
 
-const STORAGE_KEY = "instawill.db.v1";
+const STORAGE_KEY = "instawill.db.v2";
 
 function emptyDB(): DB {
   return {
@@ -115,6 +121,10 @@ function mutate<T>(fn: (d: DB) => T): T {
   return result;
 }
 
+function clone<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v));
+}
+
 // ---------- ids / time ----------
 
 export function uid(): string {
@@ -135,13 +145,19 @@ function ensureInit() {
   initialised = true;
   const had = loadFromStorage();
   if (!had || !db._seeded) {
-    // Lazy import to avoid a cycle; seed is defined in seed.ts.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { seedDatabase } = require("./seed") as typeof import("./seed");
     seedDatabase(db);
     db._seeded = true;
     persist();
   }
+  // Seeding mutates `db` in place; useSyncExternalStore only re-renders when
+  // getSnapshot() returns a NEW reference (or a listener fires). Without this,
+  // the very first render — which matched getServerSnapshot()'s pristine
+  // empty db — would never be replaced by the seeded data, since the object
+  // reference never changed. Bump it here so the post-subscribe re-check
+  // (and every getSnapshot() call from here on) reflects the seed.
+  db = { ...db };
 }
 
 export function subscribe(listener: () => void): () => void {
@@ -206,11 +222,32 @@ export function checksForWill(d: DB, willId: string): Check[] {
 export function documentsForWill(d: DB, willId: string): WillDocument[] {
   return d.documents.filter((doc) => doc.will_id === willId);
 }
-export function activeReviewSession(
-  d: DB,
-  willId: string
-): ReviewSession | undefined {
+export function activeReviewSession(d: DB, willId: string): ReviewSession | undefined {
   return d.review_sessions.find((s) => s.will_id === willId && !s.ended_at);
+}
+export function beneficiariesForWill(d: DB, willId: string): Beneficiary[] {
+  return d.beneficiaries.filter((b) => b.will_id === willId);
+}
+
+function ruleContextFor(d: DB, will: Will): RuleContext {
+  const titleDeedDoc = documentsForWill(d, will.id).find((doc) => doc.doc_type === "title_deed");
+  return {
+    identity: will.identity ?? {
+      full_name: "",
+      passport_number: "",
+      passport_expiry: "",
+      passport_expired: false,
+      residency_status: "unknown",
+    },
+    title_deed: titleDeedDoc
+      ? {
+          uploaded: titleDeedDoc.status !== "pending",
+          owner: (titleDeedDoc.ocr_extracted?.owner_name as string) ?? undefined,
+          joint_owner: Boolean(titleDeedDoc.ocr_extracted?.joint_owner),
+        }
+      : null,
+    ai_structured: will.ai_structured,
+  };
 }
 
 // ---------- lead / will lifecycle ----------
@@ -232,7 +269,7 @@ export function createIntake(seed: {
       phone: seed.phone || "",
       preferred_channel: "email",
       residency_status: "unknown",
-      current_stage: "about",
+      current_stage: "identity",
       stage_updated_at: ts,
       recoverability: "high",
       assigned_agent_id: null,
@@ -246,11 +283,18 @@ export function createIntake(seed: {
       will_type: "full",
       jurisdiction: "difc",
       status: "draft",
+      identity: null,
       structured_json: null,
+      structured_json_pre_lawyer: null,
+      raw_input_text: "",
       ai_structured: false,
+      ai_confidence_notes: "",
+      lawyer_made_changes: false,
       content_complete_at: null,
       submitted_at: null,
-      approved_at: null,
+      lawyer_approved_at: null,
+      client_approved_at: null,
+      portal_ready_at: null,
       registered_at: null,
     };
     const draft: IntakeDraft = {
@@ -262,18 +306,11 @@ export function createIntake(seed: {
         full_name: "",
         passport_number: "",
         passport_expiry: "",
+        nationality: "",
       },
       residency_status: "unknown",
       emirates_id: { uploaded: false, ocr: null, number: "" },
-      has_children_under_21: false,
-      children: [],
-      guardians: [],
-      assets: [],
-      beneficiaries: [],
-      executors: [],
-      distribution_notes: "",
-      has_foreign_will: false,
-      foreign_will_detail: "",
+      wishes_text: "",
       title_deed: { uploaded: false, ocr: null },
     };
     d.leads.push(lead);
@@ -327,12 +364,16 @@ export function updateLead(leadId: string, patch: Partial<Lead>) {
 }
 
 /**
- * Persist the structured will + rules-engine output and set content status.
- * Replaces prior beneficiaries/assets/executors/checks for the will so re-runs
- * are idempotent.
+ * Persist the LLM structuring result (identity + raw wishes + structured JSON
+ * + rules-engine output) and set content status. This is the moment
+ * `structured_json_pre_lawyer` is snapshotted — a deep clone, so later lawyer
+ * edits to `structured_json` never mutate the pre-lawyer record the client's
+ * final-approval screen diffs against.
  */
 export function commitStructuredWill(
   willId: string,
+  identity: Identity,
+  wishesText: string,
   structured: StructuredWill,
   aiStructured: boolean,
   rules: RuleResult[]
@@ -341,58 +382,17 @@ export function commitStructuredWill(
     const will = d.wills.find((w) => w.id === willId);
     if (!will) return;
     const ts = nowISO();
+    will.identity = identity;
+    will.raw_input_text = wishesText;
     will.structured_json = structured;
+    will.structured_json_pre_lawyer = clone(structured);
     will.ai_structured = aiStructured;
+    will.ai_confidence_notes = structured.confidence_notes;
     will.updated_at = ts;
 
-    // ADJD split marker on the will's jurisdiction if any asset needs ADJD.
-    will.jurisdiction = "difc";
+    applyStructuredToChildRows(d, willId, structured);
+    replaceChecks(d, willId, rules, ts);
 
-    // Replace child rows.
-    d.beneficiaries = d.beneficiaries.filter((b) => b.will_id !== willId);
-    d.assets = d.assets.filter((a) => a.will_id !== willId);
-    d.executors = d.executors.filter((e) => e.will_id !== willId);
-    d.checks = d.checks.filter((c) => c.will_id !== willId);
-
-    structured.beneficiaries.forEach((b) =>
-      d.beneficiaries.push({ id: uid(), will_id: willId, ...b })
-    );
-    structured.assets.forEach((a) =>
-      d.assets.push({ id: uid(), will_id: willId, ...a })
-    );
-    structured.executors.forEach((e) =>
-      d.executors.push({
-        id: uid(),
-        will_id: willId,
-        role: e.role,
-        name: e.name,
-        relationship: e.relationship,
-      })
-    );
-    structured.guardians.forEach((g) =>
-      d.executors.push({
-        id: uid(),
-        will_id: willId,
-        role: g.role,
-        name: g.name,
-        relationship: g.relationship,
-      })
-    );
-    rules.forEach((r) =>
-      d.checks.push({
-        id: uid(),
-        will_id: willId,
-        check_key: r.check_key,
-        severity: r.severity,
-        owner: r.owner,
-        detail: r.detail,
-        created_at: ts,
-        resolved_at: null,
-        resolved_by: null,
-      })
-    );
-
-    // Content is complete when there are no BLOCK checks outstanding.
     const hasBlock = rules.some((r) => r.severity === "block");
     if (!hasBlock && will.status === "draft") {
       will.status = "content_complete";
@@ -402,41 +402,115 @@ export function commitStructuredWill(
       id: uid(),
       lead_id: will.lead_id,
       will_id: willId,
-      event_type: "will_structured",
+      event_type: "llm_structured",
       payload: { ai_structured: aiStructured, block: hasBlock },
       created_at: ts,
     });
   });
 }
 
-export function upsertDocument(
-  willId: string,
-  doc: Omit<WillDocument, "id" | "will_id">
-) {
-  mutate((d) => {
-    const existing = d.documents.find(
-      (x) => x.will_id === willId && x.doc_type === doc.doc_type
+function applyStructuredToChildRows(d: DB, willId: string, structured: StructuredWill) {
+  d.beneficiaries = d.beneficiaries.filter((b) => b.will_id !== willId);
+  d.assets = d.assets.filter((a) => a.will_id !== willId);
+  d.executors = d.executors.filter((e) => e.will_id !== willId);
+
+  structured.beneficiaries.forEach((b) =>
+    d.beneficiaries.push({ id: uid(), will_id: willId, ...b })
+  );
+  structured.assets.forEach((a) =>
+    d.assets.push({
+      id: uid(),
+      will_id: willId,
+      asset_type: a.type,
+      emirate: a.emirate,
+      needs_adjd: a.needs_adjd,
+      description: a.description,
+    })
+  );
+  if (structured.executor.name) {
+    d.executors.push({ id: uid(), will_id: willId, role: "executor", ...structured.executor });
+  }
+  if (structured.substitute_executor) {
+    d.executors.push({
+      id: uid(),
+      will_id: willId,
+      role: "substitute_executor",
+      ...structured.substitute_executor,
+    });
+  }
+  if (structured.guardian) {
+    d.executors.push({ id: uid(), will_id: willId, role: "guardian", ...structured.guardian });
+  }
+  if (structured.substitute_guardian) {
+    d.executors.push({
+      id: uid(),
+      will_id: willId,
+      role: "substitute_guardian",
+      ...structured.substitute_guardian,
+    });
+  }
+}
+
+/**
+ * Re-run the rules engine and replace `checks`, but PRESERVE resolution state
+ * (resolved_at/resolved_by) for any check whose (check_key + detail) still
+ * matches after the edit — otherwise every lawyer edit would silently un-clear
+ * everything they'd already cleared. Checks that structurally disappear
+ * (e.g. minor_no_trust once held_in_trust flips true) simply don't reappear —
+ * no separate "resolve" bookkeeping needed for those.
+ */
+function replaceChecks(d: DB, willId: string, rules: RuleResult[], ts: string) {
+  const previous = d.checks.filter((c) => c.will_id === willId);
+  d.checks = d.checks.filter((c) => c.will_id !== willId);
+  rules.forEach((r) => {
+    const match = previous.find(
+      (p) => p.check_key === r.check_key && p.detail === r.detail && p.resolved_at
     );
+    d.checks.push({
+      id: match?.id ?? uid(),
+      will_id: willId,
+      check_key: r.check_key,
+      severity: r.severity,
+      owner: r.owner,
+      detail: r.detail,
+      created_at: match?.created_at ?? ts,
+      resolved_at: match?.resolved_at ?? null,
+      resolved_by: match?.resolved_by ?? null,
+    });
+  });
+}
+
+export function recordDocument(willId: string, docType: DocType, patch: Partial<WillDocument>) {
+  mutate((d) => {
+    const existing = d.documents.find((x) => x.will_id === willId && x.doc_type === docType);
     if (existing) {
-      Object.assign(existing, doc);
+      Object.assign(existing, patch);
     } else {
-      d.documents.push({ id: uid(), will_id: willId, ...doc });
+      d.documents.push({
+        id: uid(),
+        will_id: willId,
+        doc_type: docType,
+        status: "pending",
+        ocr_extracted: null,
+        match_result: "n_a",
+        ...patch,
+      });
     }
     d.events.push({
       id: uid(),
       will_id: willId,
       lead_id: null,
       event_type: "document_uploaded",
-      payload: { doc_type: doc.doc_type, status: doc.status },
+      payload: { doc_type: docType, status: patch.status },
       created_at: nowISO(),
     });
   });
 }
 
 /**
- * Submit a content-complete will to the lawyer queue. If required documents are
- * still pending it lands as documents_pending (async on docs, strict on content)
- * — but either way it becomes visible to the lawyer as in_review.
+ * Submit a content-complete will to the lawyer queue. If required documents
+ * are still pending it lands as documents_pending (async on docs, strict on
+ * content) but either way becomes visible to the lawyer as in_review.
  */
 export function submitWill(willId: string, documentsPending: boolean) {
   mutate((d) => {
@@ -445,8 +519,7 @@ export function submitWill(willId: string, documentsPending: boolean) {
     const ts = nowISO();
     will.submitted_at = ts;
     will.status = documentsPending ? "documents_pending" : "submitted";
-    // Move into the lawyer's review queue immediately (content is complete).
-    will.status = "in_review";
+    will.status = "in_review"; // content is complete; visible to the lawyer either way
     will.updated_at = ts;
     const lead = d.leads.find((l) => l.id === will.lead_id);
     if (lead) {
@@ -473,9 +546,7 @@ export function startReview(
   complexity: "standard" | "complex"
 ): ReviewSession {
   return mutate((d) => {
-    let session = d.review_sessions.find(
-      (s) => s.will_id === willId && !s.ended_at
-    );
+    let session = d.review_sessions.find((s) => s.will_id === willId && !s.ended_at);
     if (session) return session;
     session = {
       id: uid(),
@@ -510,39 +581,20 @@ export function clearReviewItem(
   action: ReviewItemAction
 ) {
   mutate((d) => {
-    const session = d.review_sessions.find(
-      (s) => s.will_id === willId && !s.ended_at
-    );
+    const session = d.review_sessions.find((s) => s.will_id === willId && !s.ended_at);
     const check = d.checks.find((c) => c.id === checkId);
     if (!check || !session) return;
     const ts = nowISO();
     check.resolved_at = ts;
     check.resolved_by = lawyerId;
     session.items_cleared += 1;
-    d.review_items.push({
-      id: uid(),
-      review_session_id: session.id,
-      check_id: checkId,
-      cleared_at: ts,
-      action,
-    });
+    d.review_items.push({ id: uid(), review_session_id: session.id, check_id: checkId, cleared_at: ts, action });
   });
 }
 
-/**
- * Lawyer marks a client-owned document received ("Simulate: client uploaded").
- * The lawyer can't self-author the document — only mark it received — so this
- * validates the doc and counts it toward the review session's cleared items.
- */
-export function markDocReceived(
-  willId: string,
-  docType: WillDocument["doc_type"],
-  lawyerId: string
-) {
+export function markDocReceived(willId: string, docType: DocType, lawyerId: string) {
   mutate((d) => {
-    const doc = d.documents.find(
-      (x) => x.will_id === willId && x.doc_type === docType
-    );
+    const doc = d.documents.find((x) => x.will_id === willId && x.doc_type === docType);
     const ts = nowISO();
     if (doc) {
       doc.status = "validated";
@@ -550,9 +602,7 @@ export function markDocReceived(
       doc.validated_at = ts;
       doc.match_result = "match";
     }
-    const session = d.review_sessions.find(
-      (s) => s.will_id === willId && !s.ended_at
-    );
+    const session = d.review_sessions.find((s) => s.will_id === willId && !s.ended_at);
     if (session) session.items_cleared += 1;
     d.events.push({
       id: uid(),
@@ -565,74 +615,228 @@ export function markDocReceived(
   });
 }
 
+/**
+ * Generic lawyer-amend primitive: applies `updater` to a clone of the current
+ * structured_json, re-runs the rules engine (preserving prior resolutions —
+ * see replaceChecks), and marks `lawyer_made_changes` if the result differs
+ * from the pre-lawyer snapshot. Every specific edit action (set trust, adjust
+ * a share, change the executor) funnels through this.
+ */
+export function lawyerUpdateStructuredWill(
+  willId: string,
+  updater: (w: StructuredWill) => StructuredWill
+) {
+  mutate((d) => {
+    const will = d.wills.find((w) => w.id === willId);
+    if (!will || !will.structured_json) return;
+    const next = updater(clone(will.structured_json));
+    will.structured_json = next;
+    will.updated_at = nowISO();
+    applyStructuredToChildRows(d, willId, next);
+
+    const rules = runRules(next, ruleContextFor(d, will));
+    replaceChecks(d, willId, rules, nowISO());
+
+    will.lawyer_made_changes =
+      JSON.stringify(next) !== JSON.stringify(will.structured_json_pre_lawyer);
+  });
+}
+
+export function lawyerSetBeneficiaryTrust(willId: string, name: string, heldInTrust: boolean) {
+  lawyerUpdateStructuredWill(willId, (w) => {
+    w.beneficiaries = w.beneficiaries.map((b) =>
+      b.name === name ? { ...b, held_in_trust: heldInTrust } : b
+    );
+    return w;
+  });
+}
+
+export function lawyerSetBeneficiaryField(
+  willId: string,
+  name: string,
+  field: "share_pct" | "substitution" | "relationship",
+  value: string | number
+) {
+  lawyerUpdateStructuredWill(willId, (w) => {
+    w.beneficiaries = w.beneficiaries.map((b) =>
+      b.name === name ? { ...b, [field]: value } : b
+    );
+    return w;
+  });
+}
+
+export function lawyerSetExecutor(willId: string, patch: { name: string; relationship: string }) {
+  lawyerUpdateStructuredWill(willId, (w) => ({ ...w, executor: patch }));
+}
+
+export function lawyerSetGuardian(
+  willId: string,
+  patch: { name: string; relationship: string } | null
+) {
+  lawyerUpdateStructuredWill(willId, (w) => ({ ...w, guardian: patch }));
+}
+
 export function approveWill(willId: string, lawyerId: string) {
   mutate((d) => {
     const will = d.wills.find((w) => w.id === willId);
-    const session = d.review_sessions.find(
-      (s) => s.will_id === willId && !s.ended_at
-    );
+    const session = d.review_sessions.find((s) => s.will_id === willId && !s.ended_at);
     if (!will) return;
     const ts = nowISO();
-    will.status = "approved";
-    will.approved_at = ts;
+    will.lawyer_approved_at = ts;
+    will.status = "pending_client_approval"; // lawyer_approved is momentary; this is the resting state
     will.updated_at = ts;
     if (session) {
       session.ended_at = ts;
       session.duration_seconds = Math.max(
         1,
-        Math.round(
-          (new Date(ts).getTime() - new Date(session.started_at).getTime()) /
-            1000
-        )
+        Math.round((new Date(ts).getTime() - new Date(session.started_at).getTime()) / 1000)
       );
       session.outcome = "approved" as ReviewOutcome;
     }
     const lead = d.leads.find((l) => l.id === will.lead_id);
     if (lead) {
-      lead.current_stage = "approved";
+      lead.current_stage = "pending_client_approval";
       lead.stage_updated_at = ts;
     }
     d.events.push({
       id: uid(),
       will_id: willId,
       lead_id: will.lead_id,
-      event_type: "review_completed",
-      payload: { outcome: "approved", lawyer_id: lawyerId },
+      event_type: "lawyer_approved",
+      payload: { lawyer_id: lawyerId, lawyer_made_changes: will.lawyer_made_changes },
+      created_at: ts,
+    });
+    d.events.push({
+      id: uid(),
+      will_id: willId,
+      lead_id: will.lead_id,
+      event_type: "sent_for_client_approval",
+      payload: {},
       created_at: ts,
     });
   });
 }
 
-export function setWillStatus(willId: string, status: WillStatus) {
+// ---------- client final approval (§1B-bis) ----------
+
+export function clientApprove(willId: string) {
   mutate((d) => {
     const will = d.wills.find((w) => w.id === willId);
     if (!will) return;
-    will.status = status;
-    will.updated_at = nowISO();
-    if (status === "registered") {
-      will.registered_at = nowISO();
-      const lead = d.leads.find((l) => l.id === will.lead_id);
-      if (lead) {
-        lead.current_stage = "registered";
-        lead.stage_updated_at = nowISO();
-      }
+    const ts = nowISO();
+    will.status = "client_approved";
+    will.client_approved_at = ts;
+    will.updated_at = ts;
+    const lead = d.leads.find((l) => l.id === will.lead_id);
+    if (lead) {
+      lead.current_stage = "client_approved";
+      lead.stage_updated_at = ts;
     }
+    d.events.push({
+      id: uid(),
+      will_id: willId,
+      lead_id: will.lead_id,
+      event_type: "client_approved",
+      payload: {},
+      created_at: ts,
+    });
   });
 }
 
-export function savePortalSubmission(sub: PortalSubmission) {
+export function clientRequestChange(willId: string, note: string) {
   mutate((d) => {
-    const i = d.portal_submissions.findIndex((p) => p.will_id === sub.will_id);
-    if (i >= 0) d.portal_submissions[i] = sub;
-    else d.portal_submissions.push(sub);
+    const will = d.wills.find((w) => w.id === willId);
+    if (!will) return;
+    const ts = nowISO();
+    will.status = "changes_requested";
+    will.updated_at = ts;
+    const lead = d.leads.find((l) => l.id === will.lead_id);
+    if (lead) {
+      lead.current_stage = "in_lawyer_review";
+      lead.stage_updated_at = ts;
+    }
     d.events.push({
       id: uid(),
-      will_id: sub.will_id,
-      lead_id: null,
+      will_id: willId,
+      lead_id: will.lead_id,
+      event_type: "client_requested_change",
+      payload: { note },
+      created_at: ts,
+    });
+  });
+}
+
+/** Build (or rebuild) the portal package from the current will/documents state. */
+export function generatePortalPackage(willId: string) {
+  mutate((d) => {
+    const will = d.wills.find((w) => w.id === willId);
+    if (!will || !will.structured_json || !will.identity) return;
+    const ts = nowISO();
+    const documents = documentsForWill(d, willId);
+    const packageJson = buildPortalPackage(will, will.structured_json, will.identity, documents);
+    const packageText = buildPortalPackageText(will, will.structured_json, will.identity, documents);
+
+    const existing = d.portal_submissions.find((p) => p.will_id === willId);
+    if (existing) {
+      existing.package_json = packageJson;
+      existing.package_text = packageText;
+    } else {
+      d.portal_submissions.push({
+        id: uid(),
+        will_id: willId,
+        package_json: packageJson,
+        package_text: packageText,
+        method: "manual_ops",
+        ops_user_id: null,
+        submitted_at: null,
+        appointment_at: null,
+        payment_status: "pending",
+        registration_outcome: "pending",
+        rejection_reason: null,
+      });
+    }
+
+    if (will.status === "client_approved") {
+      will.status = "portal_ready";
+      will.portal_ready_at = ts;
+      const lead = d.leads.find((l) => l.id === will.lead_id);
+      if (lead) {
+        lead.current_stage = "portal_ready";
+        lead.stage_updated_at = ts;
+      }
+    }
+    will.updated_at = ts;
+    d.events.push({
+      id: uid(),
+      will_id: willId,
+      lead_id: will.lead_id,
       event_type: "portal_package_generated",
       payload: {},
-      created_at: nowISO(),
+      created_at: ts,
     });
+  });
+}
+
+export function markWillRegistered(willId: string) {
+  mutate((d) => {
+    const will = d.wills.find((w) => w.id === willId);
+    if (!will) return;
+    const ts = nowISO();
+    will.status = "registered";
+    will.registered_at = ts;
+    will.updated_at = ts;
+    const lead = d.leads.find((l) => l.id === will.lead_id);
+    if (lead) {
+      lead.current_stage = "registered";
+      lead.stage_updated_at = ts;
+    }
+    const sub = d.portal_submissions.find((p) => p.will_id === willId);
+    if (sub) {
+      sub.registration_outcome = "registered";
+      sub.submitted_at = sub.submitted_at ?? ts;
+      sub.appointment_at = sub.appointment_at ?? ts;
+      sub.payment_status = "paid";
+    }
   });
 }
 
@@ -670,10 +874,7 @@ export function logReminder(
 export function markRecovered(leadId: string) {
   mutate((d) => {
     const lead = d.leads.find((l) => l.id === leadId);
-    // Flip the most recent reminder to "recovered" for funnel metrics.
-    const rem = [...d.reminders]
-      .reverse()
-      .find((r) => r.lead_id === leadId);
+    const rem = [...d.reminders].reverse().find((r) => r.lead_id === leadId);
     if (rem) rem.outcome = "recovered";
     if (lead) {
       lead.recoverability = "high";

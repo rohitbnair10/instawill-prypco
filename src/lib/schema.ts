@@ -1,10 +1,15 @@
 /**
- * Strict JSON schema for the LLM's structured-will output.
+ * Strict JSON schema for the LLM's structured-will output — v2.
  *
  * This is the trust boundary. The LLM's response is parsed against this zod
  * schema BEFORE anything downstream trusts it. On any validation failure the
  * caller marks the will `ai_structured = true` and routes it to the lawyer as
  * "AI-structured — verify" rather than silently using bad data.
+ *
+ * Identity (passport/Emirates ID facts) is deliberately NOT part of this
+ * schema — it's collected as structured, rules-driven fields (src/lib/types.ts
+ * `Identity`) and never invented by the model. Only the free-text wishes are
+ * structured here.
  */
 import { z } from "zod";
 
@@ -12,39 +17,17 @@ const emirate = z.enum(["dubai", "rak", "abu_dhabi", "other", "n_a"]);
 const assetType = z.enum(["property", "bank_account", "business_shares", "other"]);
 const residency = z.enum(["resident", "non_resident", "unknown"]);
 
+const personRef = z.object({
+  name: z.string().min(1),
+  relationship: z.string(),
+});
+
 export const structuredWillSchema = z.object({
   testator: z.object({
-    full_name: z.string().min(1),
-    passport_number: z.string().min(1),
-    passport_expiry: z.string().min(1),
-    passport_expired: z.boolean(),
-    residency_status: residency,
-    emirates_id_number: z.string().nullable().optional(),
-    address: z.string().nullable().optional(),
+    name: z.string().min(1),
+    nationality: z.string(),
+    residency: residency,
   }),
-  declaration_non_muslim: z.boolean(),
-  children: z.array(
-    z.object({
-      name: z.string().min(1),
-      under_21: z.boolean(),
-      resides_in_dubai_or_rak: z.boolean(),
-    })
-  ),
-  guardians: z.array(
-    z.object({
-      name: z.string().min(1),
-      relationship: z.string(),
-      role: z.enum(["guardian", "substitute_guardian"]),
-    })
-  ),
-  assets: z.array(
-    z.object({
-      asset_type: assetType,
-      emirate: emirate,
-      needs_adjd: z.boolean(),
-      description: z.string(),
-    })
-  ),
   beneficiaries: z
     .array(
       z.object({
@@ -52,104 +35,106 @@ export const structuredWillSchema = z.object({
         relationship: z.string(),
         share_pct: z.number().min(0).max(100),
         is_minor: z.boolean(),
-        held_in_trust: z.boolean(),
         substitution: z.string(),
+        // Not part of the model's required output — the lawyer sets this.
+        // Defaulted to false if the model omits it.
+        held_in_trust: z.boolean().default(false),
       })
     )
     .min(1),
-  executors: z
-    .array(
-      z.object({
-        name: z.string().min(1),
-        relationship: z.string(),
-        role: z.enum(["executor", "substitute_executor"]),
-      })
-    )
-    .min(1),
-  has_foreign_will: z.boolean(),
-  foreign_will_detail: z.string().nullable().optional(),
-  distribution_interpreted: z.boolean(),
+  executor: personRef,
+  substitute_executor: personRef.nullable(),
+  guardian: personRef.nullable(),
+  // App-level extension beyond the strict LLM schema — optional, may be null.
+  substitute_guardian: personRef.nullable().optional(),
+  assets: z.array(
+    z.object({
+      type: assetType,
+      emirate: emirate,
+      needs_adjd: z.boolean().default(false),
+      description: z.string(),
+    })
+  ),
+  foreign_will: z.boolean(),
   distribution_summary: z.string(),
+  confidence_notes: z.string(),
 });
 
 export type StructuredWillParsed = z.infer<typeof structuredWillSchema>;
 
 /**
- * JSON-schema shape passed to the Anthropic tool definition (tool-use forced
- * output). Kept in lockstep with the zod schema above. Anthropic requires a
- * JSON-Schema (draft-like) object for tool input_schema.
+ * JSON-Schema shape passed to the Anthropic tool definition (tool-use forced
+ * output). Kept in lockstep with the zod schema above.
  */
 export const structuredWillJsonSchema = {
   type: "object",
   additionalProperties: false,
   required: [
     "testator",
-    "declaration_non_muslim",
-    "children",
-    "guardians",
-    "assets",
     "beneficiaries",
-    "executors",
-    "has_foreign_will",
-    "distribution_interpreted",
+    "executor",
+    "substitute_executor",
+    "guardian",
+    "assets",
+    "foreign_will",
     "distribution_summary",
+    "confidence_notes",
   ],
   properties: {
     testator: {
       type: "object",
       additionalProperties: false,
-      required: [
-        "full_name",
-        "passport_number",
-        "passport_expiry",
-        "passport_expired",
-        "residency_status",
-      ],
+      required: ["name", "nationality", "residency"],
       properties: {
-        full_name: { type: "string" },
-        passport_number: { type: "string" },
-        passport_expiry: { type: "string", description: "ISO date YYYY-MM-DD" },
-        passport_expired: { type: "boolean" },
-        residency_status: { type: "string", enum: ["resident", "non_resident", "unknown"] },
-        emirates_id_number: { type: ["string", "null"] },
-        address: { type: ["string", "null"] },
+        name: { type: "string" },
+        nationality: { type: "string" },
+        residency: { type: "string", enum: ["resident", "non_resident", "unknown"] },
       },
     },
-    declaration_non_muslim: { type: "boolean" },
-    children: {
+    beneficiaries: {
       type: "array",
+      minItems: 1,
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["name", "under_21", "resides_in_dubai_or_rak"],
-        properties: {
-          name: { type: "string" },
-          under_21: { type: "boolean" },
-          resides_in_dubai_or_rak: { type: "boolean" },
-        },
-      },
-    },
-    guardians: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["name", "relationship", "role"],
+        required: ["name", "relationship", "share_pct", "is_minor", "substitution"],
         properties: {
           name: { type: "string" },
           relationship: { type: "string" },
-          role: { type: "string", enum: ["guardian", "substitute_guardian"] },
+          share_pct: { type: "number", minimum: 0, maximum: 100 },
+          is_minor: { type: "boolean", description: "true if beneficiary is under 21" },
+          substitution: {
+            type: "string",
+            description: "where the share goes if this beneficiary predeceases the testator",
+          },
         },
       },
+    },
+    executor: {
+      type: "object",
+      additionalProperties: false,
+      required: ["name", "relationship"],
+      properties: { name: { type: "string" }, relationship: { type: "string" } },
+    },
+    substitute_executor: {
+      type: ["object", "null"],
+      additionalProperties: false,
+      properties: { name: { type: "string" }, relationship: { type: "string" } },
+    },
+    guardian: {
+      type: ["object", "null"],
+      description: "null if no children under 21",
+      additionalProperties: false,
+      properties: { name: { type: "string" }, relationship: { type: "string" } },
     },
     assets: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["asset_type", "emirate", "needs_adjd", "description"],
+        required: ["type", "emirate", "description"],
         properties: {
-          asset_type: {
+          type: {
             type: "string",
             enum: ["property", "bank_account", "business_shares", "other"],
           },
@@ -165,57 +150,17 @@ export const structuredWillJsonSchema = {
         },
       },
     },
-    beneficiaries: {
-      type: "array",
-      minItems: 1,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "name",
-          "relationship",
-          "share_pct",
-          "is_minor",
-          "held_in_trust",
-          "substitution",
-        ],
-        properties: {
-          name: { type: "string" },
-          relationship: { type: "string" },
-          share_pct: { type: "number", minimum: 0, maximum: 100 },
-          is_minor: { type: "boolean", description: "true if beneficiary is under 21" },
-          held_in_trust: { type: "boolean" },
-          substitution: {
-            type: "string",
-            description: "where the share goes if this beneficiary predeceases the testator",
-          },
-        },
-      },
-    },
-    executors: {
-      type: "array",
-      minItems: 1,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["name", "relationship", "role"],
-        properties: {
-          name: { type: "string" },
-          relationship: { type: "string" },
-          role: { type: "string", enum: ["executor", "substitute_executor"] },
-        },
-      },
-    },
-    has_foreign_will: { type: "boolean" },
-    foreign_will_detail: { type: ["string", "null"] },
-    distribution_interpreted: {
+    foreign_will: {
       type: "boolean",
-      description:
-        "true if you had to interpret/normalise free-text distribution intent rather than copy explicit percentages",
+      description: "true if the client mentioned an existing will in another country",
     },
     distribution_summary: {
       type: "string",
-      description: "one-sentence plain-English summary of the distribution",
+      description: "one-sentence plain-language restatement of the client's intent",
+    },
+    confidence_notes: {
+      type: "string",
+      description: "anything ambiguous the model had to guess or interpret — empty string if none",
     },
   },
 } as const;

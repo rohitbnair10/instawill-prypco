@@ -1,10 +1,16 @@
 /**
- * InstaWill domain types.
+ * InstaWill domain types — v2 (automation-first).
+ *
+ * Key v2 shift from the original wizard prototype: intake is now IDENTITY
+ * (structured, rules-driven, safety-critical) + ONE free-text WISHES field
+ * (the LLM's job). `Identity` therefore lives separately from `StructuredWill`
+ * — passport/Emirates ID facts are never invented by the model; only the
+ * free-text wishes are structured by it.
  *
  * These mirror the Supabase/Postgres data model in supabase/schema.sql so the
- * localStorage store (src/lib/store.ts) and a future Postgres backend share one
- * shape. Every enum here has a matching Postgres enum. The whole business case
- * rests on timing/state data, so state transitions are always timestamped.
+ * localStorage store (src/lib/store.ts) and a future Postgres backend share
+ * one shape. Every state transition is timestamped because the timing data is
+ * the whole business case.
  */
 
 // ---------- shared enums ----------
@@ -13,17 +19,24 @@ export type PreferredChannel = "email" | "whatsapp" | "phone";
 
 export type ResidencyStatus = "resident" | "non_resident" | "unknown";
 
+/**
+ * v2 funnel: identity -> wishes -> confirm -> documents -> review -> submitted
+ * -> in_lawyer_review -> lawyer_approved -> pending_client_approval ->
+ * client_approved -> portal_ready -> registered (or abandoned at any point
+ * before submission).
+ */
 export type LeadStage =
-  | "about"
-  | "family"
-  | "assets"
-  | "beneficiaries"
-  | "safety"
+  | "identity"
+  | "wishes"
+  | "confirm"
   | "documents"
   | "review"
   | "submitted"
   | "in_lawyer_review"
-  | "approved"
+  | "lawyer_approved"
+  | "pending_client_approval"
+  | "client_approved"
+  | "portal_ready"
   | "registered"
   | "abandoned";
 
@@ -46,7 +59,10 @@ export type WillStatus =
   | "submitted"
   | "in_review"
   | "changes_requested"
-  | "approved"
+  | "lawyer_approved"
+  | "pending_client_approval"
+  | "client_approved"
+  | "portal_ready"
   | "registered"
   | "abandoned";
 
@@ -83,6 +99,7 @@ export type CheckKey =
   | "passport_expired"
   | "passport_missing"
   | "minor_no_trust"
+  | "duplicate_beneficiary"
   | "adjd_routing"
   | "foreign_will_revocation"
   | "name_mismatch"
@@ -91,6 +108,7 @@ export type CheckKey =
   | "witness_is_beneficiary"
   | "ai_distribution"
   | "guardian_needed"
+  | "substitution_missing"
   | "non_resident_path";
 
 export type UserRole = "lawyer" | "ops_agent" | "admin";
@@ -145,11 +163,22 @@ export interface Will {
   will_type: WillType;
   jurisdiction: Jurisdiction;
   status: WillStatus;
+  /** Structured, rules-driven identity (passport/Emirates ID) — never LLM output. */
+  identity: Identity | null;
+  /** Current structured content (post-lawyer, if amended). */
   structured_json: StructuredWill | null;
+  /** Snapshot BEFORE any lawyer edits — powers the client final-approval diff. */
+  structured_json_pre_lawyer: StructuredWill | null;
+  /** The client's free-text wishes, verbatim — audit trail / retraining data. */
+  raw_input_text: string;
   ai_structured: boolean;
+  ai_confidence_notes: string;
+  lawyer_made_changes: boolean;
   content_complete_at?: string | null;
   submitted_at?: string | null;
-  approved_at?: string | null;
+  lawyer_approved_at?: string | null;
+  client_approved_at?: string | null;
+  portal_ready_at?: string | null;
   registered_at?: string | null;
 }
 
@@ -161,7 +190,7 @@ export interface Beneficiary {
   share_pct: number;
   is_minor: boolean;
   held_in_trust: boolean;
-  substitution: string; // where the share goes if they predecease (e.g. "to their issue")
+  substitution: string; // where the share goes if they predecease the testator
 }
 
 export interface Asset {
@@ -186,6 +215,10 @@ export interface WillDocument {
   will_id: string;
   doc_type: DocType;
   status: DocStatus;
+  file_path?: string | null;
+  /** Signed URL (Supabase Storage) or a local object URL fallback — see storage.ts. */
+  file_url?: string | null;
+  expires_at?: string | null;
   ocr_extracted: Record<string, unknown> | null;
   match_result: MatchResult;
   uploaded_at?: string | null;
@@ -240,6 +273,8 @@ export interface PortalSubmission {
   id: string;
   will_id: string;
   package_json: PortalPackage;
+  /** The human-readable copy-paste block ops actually reads — never raw JSON. */
+  package_text: string;
   method: PortalMethod;
   ops_user_id?: string | null;
   submitted_at?: string | null;
@@ -265,100 +300,120 @@ export interface EventRow {
   created_at: string;
 }
 
+// ---------- identity (structured, rules-driven — NOT LLM output) ----------
+
+/**
+ * Identity is collected via passport OCR + a resident/non-resident branch.
+ * It is safety-critical (expired passport hard-blocks) and is deliberately
+ * kept OUT of the LLM's structuring job — the model never invents identity
+ * facts. Passed alongside StructuredWill wherever both are needed (the
+ * Schedule 1 renderer, the portal package, the rules engine).
+ */
+export interface Identity {
+  full_name: string;
+  passport_number: string;
+  passport_expiry: string; // ISO date
+  passport_expired: boolean;
+  nationality?: string | null;
+  residency_status: ResidencyStatus;
+  emirates_id_number?: string | null;
+  emirates_id_address?: string | null;
+  email?: string;
+  phone?: string;
+}
+
 // ---------- structured will (LLM output — the crown jewel schema) ----------
 
 /**
- * StructuredWill is the strict JSON the LLM must produce from the client's
- * free-text/answer intake. It is validated against a zod schema before it is
- * trusted (src/lib/schema.ts). On malformed output the will is flagged
- * `ai_structured = true` and surfaced to the lawyer as "AI-structured — verify".
+ * StructuredWill is the strict JSON the LLM produces from the client's ONE
+ * free-text wishes field. It is validated against a zod schema before it is
+ * trusted (src/lib/schema.ts). On malformed/low-confidence output the will is
+ * flagged `ai_structured = true` and surfaced to the lawyer as
+ * "AI-structured — verify" rather than trusted blind.
+ *
+ * `held_in_trust` on beneficiaries is NOT part of the LLM's output schema —
+ * the model never decides trust mechanics. It defaults to false after
+ * parsing and is set by the LAWYER during review (the human judgment call
+ * the rules engine flags but cannot resolve itself).
+ *
+ * `substitute_guardian` is an app-level extension beyond the LLM's required
+ * schema (optional, nullable) so Schedule 1 clause 5's predecease logic has
+ * somewhere to live; the model may leave it null.
  */
 export interface StructuredWill {
   testator: {
-    full_name: string;
-    passport_number: string;
-    passport_expiry: string; // ISO date
-    passport_expired: boolean;
-    residency_status: ResidencyStatus;
-    emirates_id_number?: string | null;
-    address?: string | null;
+    name: string;
+    nationality: string;
+    residency: ResidencyStatus;
   };
-  declaration_non_muslim: boolean;
-  children: Array<{
-    name: string;
-    under_21: boolean;
-    resides_in_dubai_or_rak: boolean;
-  }>;
-  guardians: Array<{
-    name: string;
-    relationship: string;
-    role: "guardian" | "substitute_guardian";
-  }>;
-  assets: Array<{
-    asset_type: AssetType;
-    emirate: Emirate;
-    needs_adjd: boolean;
-    description: string;
-  }>;
   beneficiaries: Array<{
     name: string;
     relationship: string;
     share_pct: number;
     is_minor: boolean;
-    held_in_trust: boolean;
     substitution: string;
+    held_in_trust: boolean;
   }>;
-  executors: Array<{
-    name: string;
-    relationship: string;
-    role: "executor" | "substitute_executor";
+  executor: { name: string; relationship: string };
+  substitute_executor: { name: string; relationship: string } | null;
+  guardian: { name: string; relationship: string } | null;
+  substitute_guardian?: { name: string; relationship: string } | null;
+  assets: Array<{
+    type: AssetType;
+    emirate: Emirate;
+    needs_adjd: boolean;
+    description: string;
   }>;
-  has_foreign_will: boolean;
-  foreign_will_detail?: string | null;
-  /**
-   * True when the LLM had to interpret/normalise free-text distribution intent
-   * (rather than copy explicit numbers). Drives the lawyer "verify" flag.
-   */
-  distribution_interpreted: boolean;
+  foreign_will: boolean;
   distribution_summary: string;
+  confidence_notes: string;
 }
 
 // ---------- portal package (DIFC 10-step handoff) ----------
 
 export interface PortalPackage {
   generated_at: string;
+  client_name: string;
+  jurisdiction_label: string; // "DIFC" | "DIFC + ADJD"
   step_1_service: { will_type: string; jurisdiction: string };
   step_2_personal: Record<string, unknown>;
   step_3_real_estate: Array<Record<string, unknown>>;
-  step_4_executor: Array<Record<string, unknown>>;
+  step_4_executor: Record<string, unknown>;
   step_5_beneficiaries: Array<Record<string, unknown>>;
-  step_6_distribution: { summary: string; interpreted: boolean };
+  step_6_distribution: { summary: string; sums_to_100: boolean };
   step_7_witnesses: { note: string };
-  step_8_documents: Array<Record<string, unknown>>;
+  step_8_documents: Array<{
+    doc_type: DocType;
+    status: DocStatus;
+    file_url?: string | null;
+  }>;
   step_9_appointment: { status: "client_to_book"; note: string };
   step_10_payment: { status: "client_to_pay"; note: string };
 }
 
-// ---------- intake draft (client-side working state) ----------
+// ---------- intake draft (client-side working state, v2) ----------
 
 /**
- * IntakeDraft is the raw client-side answers as they flow through the 7 steps,
- * before/after LLM structuring. It carries the free-text the LLM structures.
+ * IntakeDraft is deliberately thin in v2: structured identity + one free-text
+ * wishes field. Everything else (family, assets, beneficiaries, foreign will)
+ * used to be separate wizard steps; now the LLM structures all of it from
+ * `wishes_text` in one call.
  */
 export interface IntakeDraft {
   lead_id: string;
   will_id: string;
-  // step 0 — identity
   passport: {
     uploaded: boolean;
     ocr: {
       full_name: string;
       passport_number: string;
       passport_expiry: string;
+      nationality?: string | null;
     } | null;
     full_name: string;
     passport_number: string;
     passport_expiry: string;
+    nationality: string;
   };
   residency_status: ResidencyStatus;
   emirates_id: {
@@ -366,30 +421,18 @@ export interface IntakeDraft {
     ocr: { full_name: string; address: string } | null;
     number: string;
   };
-  // step 1 — family
-  has_children_under_21: boolean;
-  children: Array<{ name: string; under_21: boolean; resides_in_dubai_or_rak: boolean }>;
-  guardians: Array<{ name: string; relationship: string; role: "guardian" | "substitute_guardian" }>;
-  // step 2 — assets
-  assets: Array<{ asset_type: AssetType; emirate: Emirate; description: string }>;
-  // step 3 — beneficiaries & executor
-  beneficiaries: Array<{
-    name: string;
-    relationship: string;
-    share_pct: number;
-    is_minor: boolean;
-    held_in_trust: boolean;
-    substitution: string;
-  }>;
-  executors: Array<{ name: string; relationship: string; role: "executor" | "substitute_executor" }>;
-  /** free-text distribution intent that the LLM structures (crown-jewel input) */
-  distribution_notes: string;
-  // step 4 — safety
-  has_foreign_will: boolean;
-  foreign_will_detail: string;
-  // step 5 — documents
+  /** The single free-text field the LLM structures — the automation's input. */
+  wishes_text: string;
   title_deed: {
     uploaded: boolean;
     ocr: { owner: string; joint_owner: boolean } | null;
   };
+}
+
+/** Plain-language description of one change the lawyer made, for client review. */
+export interface ChangeSummaryItem {
+  field: string;
+  before: string;
+  after: string;
+  explanation: string;
 }

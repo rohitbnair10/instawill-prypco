@@ -8,9 +8,12 @@
  *      (reported standard-case AND fleet average separately — never conflated)
  *  - Registration rate                               -> registered / submitted
  *  - Funnel drop-off by stage                        -> leads grouped by current_stage
- *  - Started-but-not-submitted (re-engagement queue) -> leads in about..review
+ *  - Started-but-not-submitted (re-engagement queue) -> leads in identity..review
  *  - Cases pending at lawyer                         -> wills.status = in_review
- *  - % clerical vs judgment                          -> review_items vs duration
+ *  - Cases awaiting client final approval            -> wills.status = pending_client_approval
+ *  - Client-approval funnel                          -> client_approved vs changes_requested after lawyer_approved_at
+ *  - Lawyer-change rate                              -> lawyer_made_changes = true / lawyer-approved (proxy for LLM draft quality)
+ *  - Client-approval turnaround                      -> client_approved_at - lawyer_approved_at
  *  - Abandoned-recovery rate                         -> reminders outcome=recovered / total
  *  - Submission error rate                           -> portal_submissions rejected / total
  *  - Turnaround time                                 -> registered_at - content_complete_at
@@ -28,12 +31,23 @@ export interface Metrics {
   registrationRate: number | null;
   startedNotSubmitted: number;
   pendingAtLawyer: number;
-  approved: number;
+  pendingClientApproval: number;
+  lawyerChangeRate: number | null;
+  clientApprovalRate: number | null;
+  avgClientApprovalTurnaroundHours: number | null;
   recoveryRate: number | null;
   submissionErrorRate: number | null;
   funnelByStage: Record<LeadStage, number>;
   standardVsComplex: { standard: number; complex: number };
 }
+
+const INTAKE_STAGES = new Set<LeadStage>([
+  "identity",
+  "wishes",
+  "confirm",
+  "documents",
+  "review",
+]);
 
 export function computeMetrics(d: DB): Metrics {
   const now = new Date();
@@ -45,58 +59,33 @@ export function computeMetrics(d: DB): Metrics {
     return r.getUTCFullYear() * 12 + r.getUTCMonth() === month;
   }).length;
 
-  const completed = d.review_sessions.filter(
-    (s) => s.duration_seconds && s.outcome === "approved"
-  );
+  const completed = d.review_sessions.filter((s) => s.duration_seconds && s.outcome === "approved");
   const standard = completed.filter((s) => s.case_complexity === "standard");
   const avg = (arr: typeof completed) =>
     arr.length
-      ? Math.round(
-          (arr.reduce((sum, s) => sum + (s.duration_seconds || 0), 0) /
-            arr.length /
-            60) *
-            10
-        ) / 10
+      ? Math.round((arr.reduce((sum, s) => sum + (s.duration_seconds || 0), 0) / arr.length / 60) * 10) / 10
       : null;
 
   const submitted = d.wills.filter((w) => w.submitted_at).length;
   const registered = d.wills.filter((w) => w.registered_at).length;
 
-  const funnelByStage = Object.fromEntries(
-    [...STAGE_ORDER, "abandoned"].map((s) => [s, 0])
-  ) as Record<LeadStage, number>;
+  const funnelByStage = Object.fromEntries([...STAGE_ORDER, "abandoned"].map((s) => [s, 0])) as Record<
+    LeadStage,
+    number
+  >;
   d.leads.forEach((l) => {
     funnelByStage[l.current_stage] = (funnelByStage[l.current_stage] || 0) + 1;
   });
 
-  const inIntake = new Set<LeadStage>([
-    "about",
-    "family",
-    "assets",
-    "beneficiaries",
-    "safety",
-    "documents",
-    "review",
-  ]);
-  const startedNotSubmitted = d.leads.filter((l) =>
-    inIntake.has(l.current_stage)
-  ).length;
+  const startedNotSubmitted = d.leads.filter((l) => INTAKE_STAGES.has(l.current_stage)).length;
 
   const remindedLeads = new Set(d.reminders.map((r) => r.lead_id));
-  const recovered = new Set(
-    d.reminders.filter((r) => r.outcome === "recovered").map((r) => r.lead_id)
-  );
-  const recoveryRate = remindedLeads.size
-    ? Math.round((recovered.size / remindedLeads.size) * 100) / 100
-    : null;
+  const recovered = new Set(d.reminders.filter((r) => r.outcome === "recovered").map((r) => r.lead_id));
+  const recoveryRate = remindedLeads.size ? Math.round((recovered.size / remindedLeads.size) * 100) / 100 : null;
 
   const submissions = d.portal_submissions.filter((p) => p.submitted_at);
-  const rejected = submissions.filter(
-    (p) => p.registration_outcome === "rejected"
-  );
-  const submissionErrorRate = submissions.length
-    ? Math.round((rejected.length / submissions.length) * 100) / 100
-    : null;
+  const rejected = submissions.filter((p) => p.registration_outcome === "rejected");
+  const submissionErrorRate = submissions.length ? Math.round((rejected.length / submissions.length) * 100) / 100 : null;
 
   let complexCount = 0;
   let standardCount = 0;
@@ -107,14 +96,45 @@ export function computeMetrics(d: DB): Metrics {
     else standardCount++;
   });
 
+  // Lawyer-change rate: of wills the lawyer has approved (lawyer_approved_at set),
+  // how many needed an amendment — a proxy for LLM draft quality over time.
+  const lawyerApproved = d.wills.filter((w) => w.lawyer_approved_at);
+  const lawyerChangeRate = lawyerApproved.length
+    ? Math.round((lawyerApproved.filter((w) => w.lawyer_made_changes).length / lawyerApproved.length) * 100) / 100
+    : null;
+
+  // Client-approval funnel: of lawyer-approved wills, how many the client
+  // confirmed vs requested changes on. A high change-request rate signals the
+  // LLM or intake is misreading intent.
+  const clientDecided = d.wills.filter(
+    (w) => w.lawyer_approved_at && (w.client_approved_at || w.status === "changes_requested")
+  );
+  const clientApprovalRate = clientDecided.length
+    ? Math.round((clientDecided.filter((w) => w.client_approved_at).length / clientDecided.length) * 100) / 100
+    : null;
+
+  const turnaroundHours = d.wills
+    .filter((w) => w.lawyer_approved_at && w.client_approved_at)
+    .map(
+      (w) =>
+        (new Date(w.client_approved_at as string).getTime() - new Date(w.lawyer_approved_at as string).getTime()) /
+        3600000
+    );
+  const avgClientApprovalTurnaroundHours = turnaroundHours.length
+    ? Math.round((turnaroundHours.reduce((s, h) => s + h, 0) / turnaroundHours.length) * 10) / 10
+    : null;
+
   return {
     registeredThisMonth,
     avgLawyerMinutesStandard: avg(standard),
     avgLawyerMinutesFleet: avg(completed),
     registrationRate: submitted ? Math.round((registered / submitted) * 100) / 100 : null,
     startedNotSubmitted,
-    pendingAtLawyer: d.wills.filter((w) => w.status === "in_review").length,
-    approved: d.wills.filter((w) => w.status === "approved").length,
+    pendingAtLawyer: d.wills.filter((w) => w.status === "in_review" || w.status === "changes_requested").length,
+    pendingClientApproval: d.wills.filter((w) => w.status === "pending_client_approval").length,
+    lawyerChangeRate,
+    clientApprovalRate,
+    avgClientApprovalTurnaroundHours,
     recoveryRate,
     submissionErrorRate,
     funnelByStage,

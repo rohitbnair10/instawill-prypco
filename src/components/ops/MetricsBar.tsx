@@ -43,10 +43,20 @@ export function MetricsBar() {
         }
       />
       <Stat label="Pending at lawyer" value={String(m.pendingAtLawyer)} />
+      <Stat label="Awaiting client approval" value={String(m.pendingClientApproval)} />
       <Stat label="Started, not submitted" value={String(m.startedNotSubmitted)} />
       <Stat
         label="Registration rate"
         value={m.registrationRate != null ? `${Math.round(m.registrationRate * 100)}%` : "—"}
+      />
+      <Stat
+        label="Lawyer-change rate"
+        value={m.lawyerChangeRate != null ? `${Math.round(m.lawyerChangeRate * 100)}%` : "—"}
+        sub="drafts needing amendment"
+      />
+      <Stat
+        label="Client-approval rate"
+        value={m.clientApprovalRate != null ? `${Math.round(m.clientApprovalRate * 100)}%` : "—"}
       />
       <Stat
         label="Recovery rate"

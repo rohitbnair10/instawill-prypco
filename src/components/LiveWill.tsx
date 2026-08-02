@@ -6,7 +6,7 @@
  * [bracketed placeholders]; filled slots show the client's data highlighted.
  */
 import { buildSchedule1, type Segment } from "@/lib/schedule1";
-import type { StructuredWill } from "@/lib/types";
+import type { Identity, StructuredWill } from "@/lib/types";
 import { MockLabel } from "./ui/primitives";
 
 function SegmentView({ seg }: { seg: Segment }) {
@@ -29,12 +29,14 @@ function Paragraph({ segments }: { segments: Segment[] }) {
 
 export function LiveWill({
   structured,
+  identity = null,
   compact = false,
 }: {
   structured: StructuredWill | null;
+  identity?: Identity | null;
   compact?: boolean;
 }) {
-  const sched = buildSchedule1(structured);
+  const sched = buildSchedule1(structured, identity);
 
   return (
     <div className="legal-doc">

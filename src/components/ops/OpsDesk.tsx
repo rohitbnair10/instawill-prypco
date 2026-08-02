@@ -25,18 +25,16 @@ import {
   STAGE_ORDER,
   stageProgress,
 } from "@/lib/stateMachine";
-import type { Lead, ReminderType } from "@/lib/types";
+import type { Lead, LeadStage, ReminderType } from "@/lib/types";
 import { Button, Card, Pill, ProgressBar } from "@/components/ui/primitives";
 import { MetricsBar } from "./MetricsBar";
 
 const AGENT_ID = "user-agent-1";
 
-const INTAKE_STAGES = new Set([
-  "about",
-  "family",
-  "assets",
-  "beneficiaries",
-  "safety",
+const INTAKE_STAGES = new Set<LeadStage>([
+  "identity",
+  "wishes",
+  "confirm",
   "documents",
   "review",
 ]);

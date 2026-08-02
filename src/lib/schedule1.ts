@@ -1,16 +1,17 @@
 /**
- * DIFC Schedule 1 (Form of Will 1) template fill.
+ * DIFC Schedule 1 (Form of Will 1) template fill — v2.
  *
- * Turns a StructuredWill into the clause structure of the real DIFC Schedule 1,
- * with bracketed slots that fill from intake. Unfilled slots render as
- * `[placeholders]`; filled slots show the client's data — making "the tool
- * pre-fills the brackets, the lawyer verifies them" literally true.
+ * Turns a StructuredWill + Identity into the clause structure of the real DIFC
+ * Schedule 1, with bracketed slots that fill from the automation's output.
+ * Unfilled slots render as `[placeholders]`; filled slots show the client's
+ * data — making "the tool pre-fills the brackets, the lawyer verifies them"
+ * literally true.
  *
  * NOTE: the exact legal wording here is ILLUSTRATIVE of the Schedule 1
  * structure, not registration-grade text. The clause skeleton (1–10 + witness
  * block + void condition) matches the real form.
  */
-import type { StructuredWill } from "./types";
+import type { Identity, StructuredWill } from "./types";
 
 export type Segment =
   | { t: "text"; v: string }
@@ -37,15 +38,12 @@ function text(v: string): Segment {
   return { t: "text", v };
 }
 
-export function buildSchedule1(will: StructuredWill | null): Schedule1 {
+export function buildSchedule1(
+  will: StructuredWill | null,
+  identity: Identity | null
+): Schedule1 {
   const w = will;
-
-  const executor = w?.executors.find((e) => e.role === "executor") || null;
-  const substituteExecutor =
-    w?.executors.find((e) => e.role === "substitute_executor") || null;
-  const guardian = w?.guardians.find((g) => g.role === "guardian") || null;
-  const substituteGuardian =
-    w?.guardians.find((g) => g.role === "substitute_guardian") || null;
+  const id = identity;
 
   const clauses: Clause[] = [
     {
@@ -54,9 +52,9 @@ export function buildSchedule1(will: StructuredWill | null): Schedule1 {
       body: [
         [
           text("I, "),
-          slot(w?.testator.full_name, "full name"),
+          slot(id?.full_name || w?.testator.name, "full name"),
           text(", holder of passport number "),
-          slot(w?.testator.passport_number, "passport no."),
+          slot(id?.passport_number, "passport no."),
           text(
             ", declare that I am not a Muslim and that this Will is made under the DIFC Wills and Probate Registry Rules."
           ),
@@ -73,9 +71,7 @@ export function buildSchedule1(will: StructuredWill | null): Schedule1 {
           ),
           slot(
             w && w.assets.length
-              ? w.assets
-                  .map((a) => describeAsset(a))
-                  .join("; ")
+              ? w.assets.map((a) => describeAsset(a)).join("; ")
               : null,
             "UAE assets"
           ),
@@ -91,13 +87,11 @@ export function buildSchedule1(will: StructuredWill | null): Schedule1 {
           text(
             "I revoke all earlier testamentary dispositions made by me in respect of my UAE Estate only. "
           ),
-          w?.has_foreign_will
+          w?.foreign_will
             ? text(
                 "This revocation is expressly limited to my UAE Estate and does not affect any will governing assets outside the UAE."
               )
-            : text(
-                "This Will does not affect any assets situated outside the UAE."
-              ),
+            : text("This Will does not affect any assets situated outside the UAE."),
         ],
       ],
     },
@@ -107,13 +101,13 @@ export function buildSchedule1(will: StructuredWill | null): Schedule1 {
       body: [
         [
           text("I appoint "),
-          slot(executor?.name, "executor name"),
+          slot(w?.executor.name, "executor name"),
           text(" ("),
-          slot(executor?.relationship, "relationship"),
+          slot(w?.executor.relationship, "relationship"),
           text(
             ") to be the executor and trustee of this Will. If they are unable or unwilling to act, I appoint "
           ),
-          slot(substituteExecutor?.name, "substitute executor"),
+          slot(w?.substitute_executor?.name, "substitute executor"),
           text(" in their place."),
         ],
       ],
@@ -124,11 +118,11 @@ export function buildSchedule1(will: StructuredWill | null): Schedule1 {
       body: [
         [
           text("I appoint "),
-          slot(guardian?.name, "guardian name"),
+          slot(w?.guardian?.name, "guardian name"),
           text(
             " as guardian of my minor children. If they are unable or unwilling to act, I appoint "
           ),
-          slot(substituteGuardian?.name, "substitute guardian"),
+          slot(w?.substitute_guardian?.name, "substitute guardian"),
           text(
             ". The DIFC Courts retain final say on the children’s best interests."
           ),
@@ -140,9 +134,7 @@ export function buildSchedule1(will: StructuredWill | null): Schedule1 {
       title: "Specific Gifts",
       body: [
         [
-          text(
-            "I make the following specific gifts from my UAE Estate: "
-          ),
+          text("I make the following specific gifts from my UAE Estate: "),
           slot(
             w && w.assets.length
               ? w.assets.map((a) => describeAsset(a)).join("; ")
@@ -178,9 +170,7 @@ export function buildSchedule1(will: StructuredWill | null): Schedule1 {
               slot(b.relationship, "relationship"),
               text(")"),
               b.is_minor && !b.held_in_trust
-                ? text(
-                    ", to be held on trust until they attain 21 years of age"
-                  )
+                ? text(", to be held on trust until they attain 21 years of age")
                 : text(""),
               text(". If they predecease me, their share passes "),
               slot(b.substitution, "substitution"),
@@ -215,7 +205,7 @@ export function buildSchedule1(will: StructuredWill | null): Schedule1 {
   const witnessBlock: Segment[][] = [
     [
       text("Signed by the Testator "),
-      slot(w?.testator.full_name, "testator"),
+      slot(id?.full_name || w?.testator.name, "testator"),
       text(" in the presence of two witnesses, neither of whom is a beneficiary:"),
     ],
     [text("Witness 1: "), slot(null, "witness name & signature")],
@@ -230,22 +220,47 @@ export function buildSchedule1(will: StructuredWill | null): Schedule1 {
   };
 }
 
+/** Plain-text rendering of a Schedule1 (for console/CLI output and PDF text). */
+export function renderSchedule1Text(sched: Schedule1): string {
+  const lines: string[] = [];
+  lines.push("DIFC WILLS & PROBATE REGISTRY");
+  lines.push("Last Will & Testament — Schedule 1, Form of Will 1 (Full Will)");
+  lines.push("(Illustrative structure — not registration-grade legal text)");
+  lines.push("");
+  sched.clauses.forEach((c) => {
+    lines.push(`${c.n}. ${c.title.toUpperCase()}`);
+    c.body.forEach((para) => {
+      lines.push("   " + renderSegments(para));
+    });
+    lines.push("");
+  });
+  lines.push("EXECUTION");
+  sched.witnessBlock.forEach((para) => lines.push("   " + renderSegments(para)));
+  lines.push("");
+  lines.push(sched.voidCondition);
+  return lines.join("\n");
+}
+
+function renderSegments(segments: Segment[]): string {
+  return segments
+    .map((s) => (s.t === "text" ? s.v : s.v === null ? `[${s.placeholder}]` : s.v))
+    .join("");
+}
+
 function describeAsset(a: {
-  asset_type: string;
+  type: string;
   emirate: string;
   description: string;
 }): string {
   const kind =
-    a.asset_type === "property"
+    a.type === "property"
       ? "Real property"
-      : a.asset_type === "bank_account"
+      : a.type === "bank_account"
       ? "Bank account(s)"
-      : a.asset_type === "business_shares"
+      : a.type === "business_shares"
       ? "Business shares"
       : "Other movable property";
   const where =
-    a.emirate && a.emirate !== "n_a"
-      ? ` (${a.emirate.replace("_", " ")})`
-      : "";
+    a.emirate && a.emirate !== "n_a" ? ` (${a.emirate.replace("_", " ")})` : "";
   return `${kind}${where}${a.description ? ` — ${a.description}` : ""}`;
 }

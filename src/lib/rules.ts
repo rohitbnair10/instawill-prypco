@@ -1,5 +1,5 @@
 /**
- * Rules engine — runs the severity checks against a StructuredWill.
+ * Rules engine — runs the severity checks against a StructuredWill + Identity.
  *
  * Severity model (used everywhere):
  *   block — legally fatal, client-fixable, caught at intake (never lawyer work).
@@ -7,12 +7,18 @@
  *   info  — awareness only.
  *   ok    — passed; shown to the lawyer as a green "cleared at intake" record.
  *
- * The engine is pure: it takes structured data + document context and returns
- * RuleResult[]. Persisting these as `checks` rows is the store's job.
+ * The engine is pure: it takes structured data + identity + document context
+ * and returns RuleResult[]. Persisting these as `checks` rows is the store's job.
+ *
+ * Routing principle: objective, client-fixable errors are caught at intake and
+ * never reach the lawyer as work (they show up as passed confirmations only).
+ * Only genuine judgment calls — the machine can detect them but only a human
+ * can resolve them — surface as items the lawyer must actively clear.
  */
 import type {
   CheckKey,
   CheckOwner,
+  Identity,
   Severity,
   StructuredWill,
 } from "./types";
@@ -25,12 +31,10 @@ export interface RuleResult {
 }
 
 export interface RuleContext {
-  /** Name read from the passport OCR (to cross-check against the will name). */
-  passport_ocr_name?: string | null;
-  passport_uploaded: boolean;
+  identity: Identity;
   /** Title-deed OCR result when a property is named. */
   title_deed?: { uploaded: boolean; owner?: string; joint_owner?: boolean } | null;
-  /** Whether the LLM had to interpret distribution intent. */
+  /** Whether the LLM flagged ambiguity (confidence_notes non-empty) or failed. */
   ai_structured: boolean;
 }
 
@@ -57,51 +61,49 @@ function normaliseName(n: string): string {
  * review (the "Sarah A." vs "Sarah Anne" case); otherwise a mismatch.
  */
 export function compareNames(
-  passportName: string,
-  willName: string
+  nameA: string,
+  nameB: string
 ): "match" | "needs_review" | "mismatch" {
-  const p = normaliseName(passportName);
-  const w = normaliseName(willName);
-  if (!p || !w) return "needs_review";
-  if (p === w) return "match";
-  const pFirst = p.split(" ")[0];
-  const wFirst = w.split(" ")[0];
-  if (pFirst === wFirst) {
+  const a = normaliseName(nameA);
+  const b = normaliseName(nameB);
+  if (!a || !b) return "needs_review";
+  if (a === b) return "match";
+  const aFirst = a.split(" ")[0];
+  const bFirst = b.split(" ")[0];
+  if (aFirst === bFirst) {
     // Abbreviation vs full (e.g. "sarah a" vs "sarah anne").
-    if (w.startsWith(pFirst) || p.startsWith(pFirst)) return "needs_review";
+    if (b.startsWith(aFirst) || a.startsWith(aFirst)) return "needs_review";
   }
   return "mismatch";
 }
 
-export function runRules(
-  will: StructuredWill,
-  ctx: RuleContext
-): RuleResult[] {
+export function runRules(will: StructuredWill, ctx: RuleContext): RuleResult[] {
   const out: RuleResult[] = [];
+  const identity = ctx.identity;
 
   // ---- BLOCK checks (client-fixable, caught at intake) ----
 
   // Passport present.
-  if (!ctx.passport_uploaded || !will.testator.passport_number) {
+  if (!identity.passport_number) {
     out.push({
       check_key: "passport_missing",
       severity: "block",
       owner: "client",
       detail: "No valid passport on file. DIFC requires a valid passport.",
     });
-  } else if (will.testator.passport_expired) {
+  } else if (identity.passport_expired) {
     out.push({
       check_key: "passport_expired",
       severity: "block",
       owner: "client",
-      detail: `Passport expired (${will.testator.passport_expiry}). DIFC will not accept an expired passport.`,
+      detail: `Passport expired (${identity.passport_expiry}). DIFC will not accept an expired passport.`,
     });
   } else {
     out.push({
       check_key: "passport_expired",
       severity: "ok",
       owner: "client",
-      detail: `Passport valid (expires ${will.testator.passport_expiry}).`,
+      detail: `Passport valid (expires ${identity.passport_expiry}).`,
     });
   }
 
@@ -140,8 +142,45 @@ export function runRules(
     });
   }
 
-  // Witness-is-beneficiary — witnesses are added at registration; confirm the
-  // rule holds for the lawyer's record. (No witness collected at intake -> ok.)
+  // Minor beneficiary with no trust/holding structure. This is a hard
+  // registration blocker (a minor cannot inherit outright) — but only a
+  // LAWYER can pick the mechanism (bare trust vs. will trust), so it is
+  // classified `warn`/`owner: lawyer` rather than a client-fixable `block`:
+  // it never stops the client from submitting, but it gates lawyer approval.
+  const minorsUnresolved = will.beneficiaries.filter(
+    (b) => b.is_minor && !b.held_in_trust
+  );
+  if (minorsUnresolved.length) {
+    minorsUnresolved.forEach((b) =>
+      out.push({
+        check_key: "minor_no_trust",
+        severity: "warn",
+        owner: "lawyer",
+        detail: `${b.name} (${b.share_pct}%) is under 21 and cannot inherit outright — this is a hard registration blocker until a lawyer sets a trust/holding mechanism.`,
+      })
+    );
+  }
+
+  // Duplicate beneficiary (same person listed twice).
+  const seen = new Map<string, number>();
+  will.beneficiaries.forEach((b) => {
+    const key = normaliseName(b.name);
+    seen.set(key, (seen.get(key) || 0) + 1);
+  });
+  const dupes = [...seen.entries()].filter(([, count]) => count > 1);
+  if (dupes.length) {
+    dupes.forEach(([name]) =>
+      out.push({
+        check_key: "duplicate_beneficiary",
+        severity: "warn",
+        owner: "lawyer",
+        detail: `"${name}" appears more than once in the beneficiary list — confirm this is intentional (e.g. separate gifts) and not a structuring duplicate.`,
+      })
+    );
+  }
+
+  // Witness-is-beneficiary — witnesses are collected at registration; confirm
+  // the rule holds for the lawyer's record. (No witness collected at intake.)
   out.push({
     check_key: "witness_is_beneficiary",
     severity: "ok",
@@ -151,34 +190,22 @@ export function runRules(
 
   // ---- WARN checks (lawyer judgment calls) ----
 
-  // Name mismatch between passport and will.
-  if (ctx.passport_ocr_name && will.testator.full_name) {
-    const cmp = compareNames(ctx.passport_ocr_name, will.testator.full_name);
+  // Name mismatch between passport and structured testator name.
+  if (identity.full_name && will.testator.name) {
+    const cmp = compareNames(identity.full_name, will.testator.name);
     if (cmp === "match") {
       out.push({
         check_key: "name_mismatch",
         severity: "ok",
         owner: "client",
-        detail: `Passport name matches will ("${will.testator.full_name}").`,
+        detail: `Passport name matches the will ("${will.testator.name}").`,
       });
     } else {
       out.push({
         check_key: "name_mismatch",
         severity: "warn",
         owner: "lawyer",
-        detail: `Passport reads "${ctx.passport_ocr_name}" but the will names "${will.testator.full_name}". Confirm same person to avoid registration rejection.`,
-      });
-    }
-  }
-
-  // Minor inheriting without a trust/holding structure.
-  for (const b of will.beneficiaries) {
-    if (b.is_minor && !b.held_in_trust) {
-      out.push({
-        check_key: "minor_no_trust",
-        severity: "warn",
-        owner: "lawyer",
-        detail: `${b.name} (${b.share_pct}%) is under 21 and cannot inherit outright — needs a trust/holding structure.`,
+        detail: `Passport reads "${identity.full_name}" but the will names "${will.testator.name}". Confirm same person to avoid registration rejection.`,
       });
     }
   }
@@ -195,14 +222,13 @@ export function runRules(
   }
 
   // Foreign-will revocation clash (clause 3 must be scoped to UAE assets only).
-  if (will.has_foreign_will) {
+  if (will.foreign_will) {
     out.push({
       check_key: "foreign_will_revocation",
       severity: "warn",
       owner: "lawyer",
-      detail: `Client has a foreign will${
-        will.foreign_will_detail ? ` (${will.foreign_will_detail})` : ""
-      }. Scope clause 3 to the UAE estate only so it does not void the foreign will.`,
+      detail:
+        "Client has a foreign will. Scope clause 3 to the UAE estate only so it does not void the foreign will.",
     });
   }
 
@@ -219,54 +245,58 @@ export function runRules(
   }
 
   // Business shares — a shareholder agreement may override the will.
-  if (will.assets.some((a) => a.asset_type === "business_shares")) {
+  if (will.assets.some((a) => a.type === "business_shares")) {
     out.push({
       check_key: "business_shares",
       severity: "warn",
       owner: "lawyer",
       detail:
-        "Business shares named. A shareholder / free-zone agreement may override the will's transfer — confirm transferability.",
+        "Business shares named. A shareholder / free-zone agreement may override the will's transfer — confirm testamentary transfer is permitted.",
     });
   }
 
-  // AI-structured distribution — verify.
-  if (ctx.ai_structured || will.distribution_interpreted) {
+  // Missing substitution for a beneficiary.
+  const missingSubstitution = will.beneficiaries.filter(
+    (b) => !b.substitution?.trim()
+  );
+  if (missingSubstitution.length) {
+    missingSubstitution.forEach((b) =>
+      out.push({
+        check_key: "substitution_missing",
+        severity: "warn",
+        owner: "lawyer",
+        detail: `No predecease/substitution instruction for ${b.name} — confirm where their share goes if they predecease the testator.`,
+      })
+    );
+  }
+
+  // AI-structured / ambiguous distribution — verify against client intent.
+  if (ctx.ai_structured || will.confidence_notes?.trim()) {
     out.push({
       check_key: "ai_distribution",
       severity: "warn",
       owner: "lawyer",
-      detail: `Distribution was AI-structured from free text ("${will.distribution_summary}"). Verify it matches the client's intent before approval.`,
+      detail: `AI-structured from free text ("${will.distribution_summary}"). Model's notes: ${
+        will.confidence_notes?.trim() || "(none)"
+      }. Verify this matches the client's intent before approval.`,
     });
   }
 
   // ---- INFO / awareness ----
 
   // Guardianship.
-  const minorsInUAE = will.children.some(
-    (c) => c.under_21 && c.resides_in_dubai_or_rak
-  );
-  if (minorsInUAE) {
-    if (will.guardians.length) {
-      out.push({
-        check_key: "guardian_needed",
-        severity: "info",
-        owner: "none",
-        detail:
-          "Guardian nominated for a minor child. The court retains final say on the child's best interests — registration nominates, it does not guarantee.",
-      });
-    } else {
-      out.push({
-        check_key: "guardian_needed",
-        severity: "warn",
-        owner: "client",
-        detail:
-          "Children under 21 in Dubai/RAK but no guardian nominated. A guardian nomination is required.",
-      });
-    }
+  if (will.guardian) {
+    out.push({
+      check_key: "guardian_needed",
+      severity: "info",
+      owner: "none",
+      detail:
+        "Guardian nominated for a minor child. The court retains final say on the child's best interests — registration nominates, it does not guarantee.",
+    });
   }
 
   // Non-resident remote registration path.
-  if (will.testator.residency_status === "non_resident") {
+  if (identity.residency_status === "non_resident") {
     out.push({
       check_key: "non_resident_path",
       severity: "info",

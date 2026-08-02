@@ -1,45 +1,38 @@
 "use client";
 
 /**
- * The Portal-Ready Package (capstone). Shows the 10-step DIFC Courts portal form
- * mapped to already-validated data. Steps 1–8 are data InstaWill holds; steps
- * 9–10 (appointment + payment) stay with the client. Copy for Ops / Download
- * JSON. Today Ops pastes from here; v2 auto-fills the portal — the second
- * bottleneck, deliberately deferred.
+ * The Portal-Ready Package (capstone). Renders the human-readable, copy-paste
+ * text block (§1.5) — never raw JSON — mapped to the DIFC portal's 10 steps.
+ * "Copy package for Ops" / "Download as PDF" (the package text, for Ops to
+ * paste from), plus "Generate draft will PDF" which calls the real PDF
+ * renderer and uploads it to storage so it appears as a clickable document
+ * link in Step 8. Today Ops pastes from here; v2 auto-fills the portal.
  */
 import { useState } from "react";
-import type { PortalSubmission } from "@/lib/types";
+import type { Identity, PortalSubmission, StructuredWill } from "@/lib/types";
+import { recordDocument, generatePortalPackage } from "@/lib/store";
+import { uploadDocumentFile } from "@/lib/storage";
 import { Button, Card, MockLabel, Pill } from "@/components/ui/primitives";
-
-const STEP_META: Array<{ key: keyof PortalSubmission["package_json"]; label: string }> = [
-  { key: "step_1_service", label: "1. Service selection" },
-  { key: "step_2_personal", label: "2. Personal info" },
-  { key: "step_3_real_estate", label: "3. Real estate" },
-  { key: "step_4_executor", label: "4. Executor" },
-  { key: "step_5_beneficiaries", label: "5. Beneficiaries" },
-  { key: "step_6_distribution", label: "6. Distribution" },
-  { key: "step_7_witnesses", label: "7. Witnesses" },
-  { key: "step_8_documents", label: "8. Document uploads" },
-  { key: "step_9_appointment", label: "9. Appointment" },
-  { key: "step_10_payment", label: "10. Payment" },
-];
 
 export function PortalPackageView({
   submission,
   onMarkRegistered,
   registered,
+  structured,
+  identity,
 }: {
   submission: PortalSubmission;
   onMarkRegistered: () => void;
   registered: boolean;
+  structured: StructuredWill | null;
+  identity: Identity | null;
 }) {
   const [copied, setCopied] = useState(false);
-  const pkg = submission.package_json;
-  const json = JSON.stringify(pkg, null, 2);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
 
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(json);
+      await navigator.clipboard.writeText(submission.package_text);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -47,14 +40,40 @@ export function PortalPackageView({
     }
   };
 
-  const download = () => {
-    const blob = new Blob([json], { type: "application/json" });
+  const downloadText = () => {
+    const blob = new Blob([submission.package_text], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "difc-portal-package.json";
+    a.download = "difc-portal-package.txt";
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const generateDraftPdf = async () => {
+    if (!structured) return;
+    setGeneratingPdf(true);
+    try {
+      const res = await fetch("/api/will-pdf", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ structured, identity }),
+      });
+      if (!res.ok) throw new Error(`PDF generation failed (${res.status})`);
+      const blob = await res.blob();
+      const stored = await uploadDocumentFile(submission.will_id, "draft_will_pdf", blob, "draft-will.pdf");
+      recordDocument(submission.will_id, "draft_will_pdf", {
+        status: "validated",
+        file_path: stored.file_path,
+        file_url: stored.file_url,
+        expires_at: stored.expires_at,
+        uploaded_at: new Date().toISOString(),
+        validated_at: new Date().toISOString(),
+      });
+      generatePortalPackage(submission.will_id); // rebuild the package text with the new link
+    } finally {
+      setGeneratingPdf(false);
+    }
   };
 
   return (
@@ -62,47 +81,24 @@ export function PortalPackageView({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 className="font-serif text-lg text-ink">Portal-Ready Package</h3>
-          <p className="text-xs text-slate">
-            DIFC Courts 10-step form, pre-mapped from validated data.
-          </p>
+          <p className="text-xs text-slate">DIFC Courts 10-step form, pre-mapped from validated data.</p>
         </div>
         <MockLabel>Portal submission external</MockLabel>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
-        {STEP_META.map((s, i) => {
-          const clientStep = i >= 8;
-          return (
-            <div
-              key={s.key}
-              className={`rounded-lg border p-3 text-sm ${
-                clientStep
-                  ? "border-amber/30 bg-amber/6"
-                  : "border-sage/30 bg-sage/6"
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-medium text-ink">{s.label}</span>
-                {clientStep ? (
-                  <Pill tone="amber">Client</Pill>
-                ) : (
-                  <Pill tone="sage">Pre-filled</Pill>
-                )}
-              </div>
-              <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-[11px] text-slate">
-                {JSON.stringify(pkg[s.key], null, 1)}
-              </pre>
-            </div>
-          );
-        })}
-      </div>
+      <pre className="mt-4 max-h-96 overflow-auto whitespace-pre-wrap rounded-lg bg-paper-deep/40 p-4 font-mono text-xs text-ink">
+        {submission.package_text}
+      </pre>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <Button variant="secondary" onClick={copy}>
           {copied ? "Copied ✓" : "Copy package for Ops"}
         </Button>
-        <Button variant="secondary" onClick={download}>
-          Download JSON
+        <Button variant="secondary" onClick={downloadText}>
+          Download package (.txt)
+        </Button>
+        <Button variant="secondary" disabled={generatingPdf} onClick={generateDraftPdf}>
+          {generatingPdf ? "Generating…" : "Generate draft will PDF"}
         </Button>
         {!registered ? (
           <Button variant="sage" onClick={onMarkRegistered}>

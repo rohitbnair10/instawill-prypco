@@ -14,6 +14,8 @@ export interface OcrResponse<T> {
   extracted: T;
   source: "vision" | "fallback";
   note: string;
+  /** The raw file that was captured — pass to storage.ts to also persist it. */
+  file: File;
 }
 
 function fileToBase64(file: File): Promise<{ base64: string; mediaType: string }> {
@@ -63,7 +65,7 @@ export function ImageCapture<T>({
         }),
       });
       if (!res.ok) throw new Error(`OCR failed (${res.status})`);
-      const data = (await res.json()) as OcrResponse<T>;
+      const data = { ...((await res.json()) as Omit<OcrResponse<T>, "file">), file };
       setLastResult(data);
       onExtracted(data);
     } catch (err) {

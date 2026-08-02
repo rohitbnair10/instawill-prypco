@@ -1,98 +1,152 @@
 "use client";
 
 /**
- * CLIENT JOURNEY — a 7-step intake that assembles the DIFC Schedule 1 will live.
- * Two-panel: questions left, the will document filling in real time on the right.
+ * CLIENT JOURNEY — v2, automation-first.
+ *
+ * Two-panel layout: input left, the live-assembling DIFC Schedule 1 document
+ * right. Five steps:
+ *   0. Identity        — passport-first OCR, residency branch (rules, not AI).
+ *   1. Your wishes      — ONE free-text box. This triggers the real LLM call.
+ *   2. Confirm           — "here's what we understood": plain-language summary
+ *                          + editable structured fields + rules-engine flags.
+ *   3. Documents         — deferrable, never gatekeeps.
+ *   4. Review & submit   — completeness checklist + dual CTAs.
  *
  * Design principle honoured throughout: STRICT on content, ASYNC on documents.
  * Only will-CONTENT that makes the will legally unregistrable ever blocks the
- * client (shares != 100, no UAE asset, missing/expired passport). Documents
- * never block — the client can always skip and submit.
+ * client (shares != 100, no UAE asset, missing/expired passport).
  */
 import { useEffect, useMemo, useState } from "react";
 import type {
   AssetType,
   Emirate,
+  Identity,
   IntakeDraft,
   LeadStage,
   StructuredWill,
+  Will,
 } from "@/lib/types";
-import { deterministicStructure } from "@/lib/structure";
+import { fallbackStructure } from "@/lib/structure";
 import { compareNames, runRules, type RuleResult } from "@/lib/rules";
 import type { StructureResult } from "@/lib/llm";
 import {
   commitStructuredWill,
   createIntake,
   getDB,
+  recordDocument,
   saveDraft,
   setLeadStage,
   submitWill,
   updateLead,
-  upsertDocument,
+  useDB,
+  willsForLead,
 } from "@/lib/store";
+import { uploadDocumentFile } from "@/lib/storage";
 import { LiveWill } from "@/components/LiveWill";
 import { ImageCapture } from "@/components/ui/ImageCapture";
-import type {
-  EmiratesIdExtract,
-  PassportExtract,
-  TitleDeedExtract,
-} from "@/lib/ocrSchema";
+import type { EmiratesIdExtract, PassportExtract, TitleDeedExtract } from "@/lib/ocrSchema";
 import {
   Button,
   Card,
   Labeled,
   MockLabel,
   Pill,
-  ProgressBar,
-  SeverityBadge,
   Select,
+  SeverityBadge,
   TextInput,
 } from "@/components/ui/primitives";
+import { ClientFinalApproval } from "./ClientFinalApproval";
 
-const STEPS = [
-  "Identity",
-  "Family",
-  "Assets",
-  "Beneficiaries",
-  "Safety",
-  "Documents",
-  "Review",
-] as const;
+const STEPS = ["Identity", "Your wishes", "Confirm", "Documents", "Review"] as const;
 
-const STAGE_FOR_STEP: LeadStage[] = [
-  "about",
-  "family",
-  "assets",
-  "beneficiaries",
-  "safety",
-  "documents",
-  "review",
-];
+const STAGE_FOR_STEP: LeadStage[] = ["identity", "wishes", "confirm", "documents", "review"];
 
-function todayISO() {
-  return new Date().toISOString().slice(0, 10);
-}
-function futureDate(years: number) {
-  const d = new Date();
-  d.setFullYear(d.getFullYear() + years);
-  return d.toISOString().slice(0, 10);
+function identityFromDraft(draft: IntakeDraft): Identity {
+  return {
+    full_name: draft.passport.full_name,
+    passport_number: draft.passport.passport_number,
+    passport_expiry: draft.passport.passport_expiry,
+    passport_expired:
+      Boolean(draft.passport.passport_expiry) &&
+      new Date(draft.passport.passport_expiry) < new Date(),
+    nationality: draft.passport.nationality || null,
+    residency_status: draft.residency_status,
+    emirates_id_number: draft.emirates_id.number || null,
+    emirates_id_address: draft.emirates_id.ocr?.address || null,
+  };
 }
 
 export function ClientJourney() {
-  const [ids, setIds] = useState<{ leadId: string; willId: string } | null>(
-    null
-  );
+  const db = useDB();
+  const [approvalWillId, setApprovalWillId] = useState<string | null>(null);
+  const [manualIntake, setManualIntake] = useState(false);
+
+  const pendingApproval = db.wills.filter((w) => w.status === "pending_client_approval");
+
+  if (approvalWillId) {
+    return (
+      <ClientFinalApproval
+        willId={approvalWillId}
+        onDone={() => setApprovalWillId(null)}
+      />
+    );
+  }
+
+  // Derived directly from live store state on every render (not a one-time
+  // effect) — the store seeds asynchronously on first mount, so deciding this
+  // once at mount time would race the seed and could permanently skip the
+  // picker on a fresh page load even when a will is genuinely pending.
+  if (pendingApproval.length > 0 && !manualIntake) {
+    return (
+      <div className="mx-auto max-w-xl px-5 py-10">
+        <h2 className="font-serif text-2xl text-ink">Welcome back</h2>
+        <p className="mt-2 text-sm text-slate">
+          You have {pendingApproval.length} will{pendingApproval.length === 1 ? "" : "s"}{" "}
+          awaiting your final approval before it can go to registration.
+        </p>
+        <div className="mt-4 space-y-2">
+          {pendingApproval.map((w) => (
+            <Card key={w.id} className="flex items-center justify-between p-4">
+              <div>
+                <div className="font-medium text-ink">
+                  {w.structured_json?.testator.name || w.identity?.full_name}
+                </div>
+                <div className="text-xs text-slate">
+                  {w.lawyer_made_changes
+                    ? "Your lawyer made changes — review before proceeding"
+                    : "Your lawyer approved with no changes"}
+                </div>
+              </div>
+              <Button onClick={() => setApprovalWillId(w.id)}>Review &amp; approve</Button>
+            </Card>
+          ))}
+        </div>
+        <Button className="mt-6" variant="secondary" onClick={() => setManualIntake(true)}>
+          Start a new will instead →
+        </Button>
+      </div>
+    );
+  }
+
+  return <IntakeWizard />;
+}
+
+// ---------------------------------------------------------------------------
+// The 5-step wizard
+// ---------------------------------------------------------------------------
+
+function IntakeWizard() {
+  const [ids, setIds] = useState<{ leadId: string; willId: string } | null>(null);
   const [draft, setDraft] = useState<IntakeDraft | null>(null);
   const [step, setStep] = useState(0);
   const [structuring, setStructuring] = useState(false);
   const [result, setResult] = useState<StructureResult | null>(null);
+  const [editable, setEditable] = useState<StructuredWill | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
-  // Start a fresh intake on mount.
   useEffect(() => {
-    const { lead, will, draft } = createIntake({
-      utm: { utm_source: "demo", utm_medium: "direct" },
-    });
+    const { lead, will, draft } = createIntake({ utm: { utm_source: "demo", utm_medium: "direct" } });
     setIds({ leadId: lead.id, willId: will.id });
     setDraft(draft);
   }, []);
@@ -106,23 +160,15 @@ export function ClientJourney() {
     });
   };
 
-  const structured: StructuredWill | null = useMemo(() => {
-    if (!draft) return null;
-    if (result) return result.structured;
-    return deterministicStructure(draft, todayISO());
-  }, [draft, result]);
+  if (!draft || !ids) return null;
 
-  if (!draft || !ids || !structured) return null;
+  const identity = identityFromDraft(draft);
+  const previewStructured: StructuredWill = editable ?? fallbackStructure(identity, draft.wishes_text);
 
   const goto = (n: number) => {
     setStep(n);
-    const stage = STAGE_FOR_STEP[n];
-    setLeadStage(ids.leadId, stage);
-    // Keep the lead's headline fields in sync for the ops desk.
-    updateLead(ids.leadId, {
-      full_name: draft.passport.full_name || draft.passport.ocr?.full_name || "",
-      residency_status: draft.residency_status,
-    });
+    setLeadStage(ids.leadId, STAGE_FOR_STEP[n]);
+    updateLead(ids.leadId, { full_name: identity.full_name, residency_status: identity.residency_status });
   };
 
   return (
@@ -132,56 +178,71 @@ export function ClientJourney() {
         <div className="mx-auto max-w-xl">
           <StepHeader step={step} />
           <div className="mt-6">
-            {step === 0 && (
-              <IdentityStep draft={draft} update={update} />
-            )}
-            {step === 1 && <FamilyStep draft={draft} update={update} />}
-            {step === 2 && <AssetsStep draft={draft} update={update} />}
-            {step === 3 && (
-              <BeneficiariesStep draft={draft} update={update} />
-            )}
-            {step === 4 && <SafetyStep draft={draft} update={update} />}
-            {step === 5 && (
-              <DocumentsStep
+            {step === 0 && <IdentityStep draft={draft} update={update} willId={ids.willId} />}
+            {step === 1 && (
+              <WishesStep
                 draft={draft}
                 update={update}
-                willId={ids.willId}
-              />
-            )}
-            {step === 6 && (
-              <ReviewStep
-                draft={draft}
-                structured={structured}
                 structuring={structuring}
-                result={result}
-                submitted={submitted}
                 onStructure={async () => {
                   setStructuring(true);
                   try {
                     const res = await fetch("/api/structure", {
                       method: "POST",
                       headers: { "content-type": "application/json" },
-                      body: JSON.stringify({ draft }),
+                      body: JSON.stringify({ identity, wishes_text: draft.wishes_text }),
                     });
                     const data = (await res.json()) as StructureResult;
                     setResult(data);
+                    setEditable(data.structured);
                   } catch {
-                    // Client-side fallback so the demo never dead-ends.
+                    const fb = fallbackStructure(identity, draft.wishes_text);
                     setResult({
-                      structured: deterministicStructure(draft, todayISO()),
-                      ai_structured: Boolean(draft.distribution_notes.trim()),
+                      structured: fb,
+                      ai_structured: true,
                       source: "fallback",
-                      note: "Network error — structured locally (offline).",
+                      note: "Network error reaching /api/structure — used the honest fallback.",
                     });
+                    setEditable(fb);
                   } finally {
                     setStructuring(false);
+                    goto(2);
                   }
                 }}
+              />
+            )}
+            {step === 2 && editable && result && (
+              <ConfirmStep
+                identity={identity}
+                structured={editable}
+                setStructured={setEditable}
+                result={result}
+                confirmed={confirmed}
+                onConfirm={() => {
+                  const rules = runRules(editable, {
+                    identity,
+                    title_deed: draft.title_deed.uploaded
+                      ? { uploaded: true, owner: draft.title_deed.ocr?.owner, joint_owner: draft.title_deed.ocr?.joint_owner }
+                      : null,
+                    ai_structured: result.ai_structured,
+                  });
+                  commitStructuredWill(ids.willId, identity, draft.wishes_text, editable, result.ai_structured, rules);
+                  setConfirmed(true);
+                  goto(3);
+                }}
+              />
+            )}
+            {step === 3 && (
+              <DocumentsStep draft={draft} update={update} willId={ids.willId} identity={identity} />
+            )}
+            {step === 4 && (
+              <ReviewStep
+                draft={draft}
+                identity={identity}
+                structured={editable}
+                aiStructured={result?.ai_structured ?? false}
+                submitted={submitted}
                 onSubmit={(documentsPending) => {
-                  const active = result?.structured ?? structured;
-                  const ai = result?.ai_structured ?? false;
-                  const rules = clientRules(draft, active, ai);
-                  commitStructuredWill(ids.willId, active, ai, rules);
                   submitWill(ids.willId, documentsPending);
                   setSubmitted(true);
                 }}
@@ -192,7 +253,8 @@ export function ClientJourney() {
           <StepNav
             step={step}
             draft={draft}
-            structured={structured}
+            confirmed={confirmed}
+            structuring={structuring}
             submitted={submitted}
             onBack={() => goto(step - 1)}
             onNext={() => goto(step + 1)}
@@ -209,15 +271,15 @@ export function ClientJourney() {
             </span>
             {result && (
               <Pill tone={result.source === "llm" ? "sage" : "amber"}>
-                {result.source === "llm" ? "LLM-structured" : "Auto-structured"}
+                {result.source === "llm" ? "LLM-structured" : "Fallback"}
               </Pill>
             )}
           </div>
           <Card className="p-6">
-            <LiveWill structured={structured} />
+            <LiveWill structured={step >= 1 ? previewStructured : null} identity={identity} />
           </Card>
           <p className="mt-3 text-center text-xs text-slate">
-            Nothing is final until a lawyer signs off.
+            Nothing is final until a lawyer signs off — and then, until you do too.
           </p>
         </div>
       </div>
@@ -225,21 +287,12 @@ export function ClientJourney() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Header + progress
-// ---------------------------------------------------------------------------
-
 function StepHeader({ step }: { step: number }) {
   return (
     <div>
       <div className="mb-3 flex items-center gap-1.5">
         {STEPS.map((_, i) => (
-          <div
-            key={i}
-            className={`h-1.5 flex-1 rounded-full ${
-              i <= step ? "bg-sage" : "bg-paper-deep"
-            }`}
-          />
+          <div key={i} className={`h-1.5 flex-1 rounded-full ${i <= step ? "bg-sage" : "bg-paper-deep"}`} />
         ))}
       </div>
       <div className="text-xs font-medium uppercase tracking-widest text-slate">
@@ -251,17 +304,19 @@ function StepHeader({ step }: { step: number }) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 0 — Identity (passport-first OCR)
+// Step 0 — Identity
 // ---------------------------------------------------------------------------
 
 function IdentityStep({
   draft,
   update,
+  willId,
 }: {
   draft: IntakeDraft;
   update: (p: Partial<IntakeDraft>) => void;
+  willId: string;
 }) {
-  const applyExtraction = (extracted: PassportExtract) => {
+  const applyExtraction = (extracted: PassportExtract, file?: File) => {
     update({
       passport: {
         uploaded: true,
@@ -269,34 +324,51 @@ function IdentityStep({
           full_name: extracted.full_name,
           passport_number: extracted.passport_number,
           passport_expiry: extracted.passport_expiry,
+          nationality: extracted.nationality ?? null,
         },
         full_name: extracted.full_name,
         passport_number: extracted.passport_number,
         passport_expiry: extracted.passport_expiry,
+        nationality: extracted.nationality || "",
       },
     });
+    if (file) {
+      uploadDocumentFile(willId, "passport", file).then((stored) =>
+        recordDocument(willId, "passport", {
+          status: "validated",
+          ocr_extracted: { ...extracted },
+          match_result: "match",
+          file_path: stored.file_path,
+          file_url: stored.file_url,
+          expires_at: stored.expires_at,
+          uploaded_at: new Date().toISOString(),
+          validated_at: new Date().toISOString(),
+        })
+      );
+    }
   };
 
-  const scanDemo = (expired: boolean) => {
-    const expiry = expired ? "2023-04-01" : futureDate(6);
+  const scanDemo = () => {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() + 6);
     applyExtraction({
       full_name: "Sarah Anne Whitfield",
       passport_number: "561234789",
-      passport_expiry: expiry,
+      passport_expiry: d.toISOString().slice(0, 10),
+      nationality: "British",
       legible: true,
     });
   };
 
   const expired =
-    draft.passport.uploaded &&
-    new Date(draft.passport.passport_expiry) < new Date();
+    draft.passport.uploaded && new Date(draft.passport.passport_expiry) < new Date();
 
   return (
     <div className="space-y-5">
       <p className="text-sm text-slate">
-        We start with your passport. Scan it and we&apos;ll read your details —
-        you just review and correct. Passport is mandatory; Emirates ID is asked
-        only if you&apos;re a UAE resident.
+        We start with your passport. Scan it and we&apos;ll read your details — you just
+        review and correct. Passport is mandatory; Emirates ID is asked only if
+        you&apos;re a UAE resident.
       </p>
 
       {!draft.passport.uploaded ? (
@@ -309,13 +381,10 @@ function IdentityStep({
             <ImageCapture<PassportExtract>
               docType="passport"
               label="passport"
-              onExtracted={({ extracted }) => applyExtraction(extracted)}
+              onExtracted={({ extracted, file }) => applyExtraction(extracted, file)}
             />
           </div>
-          <button
-            className="mt-3 text-xs text-slate underline"
-            onClick={() => scanDemo(false)}
-          >
+          <button className="mt-3 text-xs text-slate underline" onClick={scanDemo}>
             No document handy? Use a demo passport
           </button>
         </Card>
@@ -323,47 +392,34 @@ function IdentityStep({
         <>
           {expired && (
             <div className="rounded-lg border border-clay/40 bg-clay/8 p-3 text-sm text-clay">
-              <SeverityBadge severity="block" /> This passport is expired. DIFC
-              won&apos;t accept it — please provide a valid passport before
-              submitting.
+              <SeverityBadge severity="block" /> This passport is expired. DIFC won&apos;t
+              accept it — please provide a valid passport before submitting.
             </div>
           )}
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Labeled label="Full name">
               <TextInput
                 value={draft.passport.full_name}
-                onChange={(e) =>
-                  update({
-                    passport: { ...draft.passport, full_name: e.target.value },
-                  })
-                }
+                onChange={(e) => update({ passport: { ...draft.passport, full_name: e.target.value } })}
+              />
+            </Labeled>
+            <Labeled label="Nationality">
+              <TextInput
+                value={draft.passport.nationality}
+                onChange={(e) => update({ passport: { ...draft.passport, nationality: e.target.value } })}
               />
             </Labeled>
             <Labeled label="Passport number">
               <TextInput
                 value={draft.passport.passport_number}
-                onChange={(e) =>
-                  update({
-                    passport: {
-                      ...draft.passport,
-                      passport_number: e.target.value,
-                    },
-                  })
-                }
+                onChange={(e) => update({ passport: { ...draft.passport, passport_number: e.target.value } })}
               />
             </Labeled>
             <Labeled label="Passport expiry">
               <TextInput
                 type="date"
                 value={draft.passport.passport_expiry}
-                onChange={(e) =>
-                  update({
-                    passport: {
-                      ...draft.passport,
-                      passport_expiry: e.target.value,
-                    },
-                  })
-                }
+                onChange={(e) => update({ passport: { ...draft.passport, passport_expiry: e.target.value } })}
               />
             </Labeled>
           </div>
@@ -371,13 +427,7 @@ function IdentityStep({
             className="text-xs text-slate underline"
             onClick={() =>
               update({
-                passport: {
-                  uploaded: false,
-                  ocr: null,
-                  full_name: "",
-                  passport_number: "",
-                  passport_expiry: "",
-                },
+                passport: { uploaded: false, ocr: null, full_name: "", passport_number: "", passport_expiry: "", nationality: "" },
               })
             }
           >
@@ -395,9 +445,7 @@ function IdentityStep({
             Yes, resident
           </Button>
           <Button
-            variant={
-              draft.residency_status === "non_resident" ? "sage" : "secondary"
-            }
+            variant={draft.residency_status === "non_resident" ? "sage" : "secondary"}
             onClick={() => update({ residency_status: "non_resident" })}
           >
             No, non-resident
@@ -407,9 +455,8 @@ function IdentityStep({
 
       {draft.residency_status === "non_resident" && (
         <div className="rounded-lg border border-slate/30 bg-slate/8 p-3 text-sm text-slate">
-          <SeverityBadge severity="info" /> No Emirates ID needed. You&apos;ll
-          register via the supervised remote video path, witnessed by a
-          home-country notary/solicitor.
+          <SeverityBadge severity="info" /> No Emirates ID needed. You&apos;ll register via
+          the supervised remote video path, witnessed by a home-country notary/solicitor.
         </div>
       )}
     </div>
@@ -417,597 +464,333 @@ function IdentityStep({
 }
 
 // ---------------------------------------------------------------------------
-// Step 1 — Family
+// Step 1 — Your wishes (the automation's input)
 // ---------------------------------------------------------------------------
 
-function FamilyStep({
+const EXAMPLE_WISHES = `I'm British, married to Sarah, we live in Dubai Marina. I want everything to go to Sarah, but if she dies before me, split it equally between our two kids — the youngest, Alex, is 9. We own the Marina apartment and have savings in Emirates NBD. My brother James should be the executor. I also have an old will in the UK.`;
+
+function WishesStep({
   draft,
   update,
+  structuring,
+  onStructure,
 }: {
   draft: IntakeDraft;
   update: (p: Partial<IntakeDraft>) => void;
+  structuring: boolean;
+  onStructure: () => void;
 }) {
-  const hasChildren = draft.has_children_under_21;
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-slate">
+        Tell us about your family, your assets in the UAE, and how you want things
+        divided — in your own words. No forms to fill in: a real AI call reads this
+        and structures it into your will.
+      </p>
+      <textarea
+        className="w-full rounded-lg border border-hairline bg-white px-3 py-3 text-sm text-ink outline-none focus:border-slate focus:ring-2 focus:ring-slate/20"
+        rows={10}
+        placeholder={EXAMPLE_WISHES}
+        value={draft.wishes_text}
+        onChange={(e) => update({ wishes_text: e.target.value })}
+      />
+      <div className="flex items-center gap-2">
+        <button
+          className="text-xs text-slate underline"
+          onClick={() => update({ wishes_text: EXAMPLE_WISHES })}
+        >
+          Use example wishes
+        </button>
+      </div>
+      <Button
+        className="w-full"
+        disabled={!draft.wishes_text.trim() || structuring}
+        onClick={onStructure}
+      >
+        {structuring ? "Structuring your wishes…" : "Structure my wishes →"}
+      </Button>
+      <p className="text-center text-xs text-slate">
+        This calls a real Anthropic model to turn your paragraph into a structured
+        will — the next screen shows exactly what it understood, for you to correct.
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Step 2 — Confirm ("here's what we understood")
+// ---------------------------------------------------------------------------
+
+function ConfirmStep({
+  identity,
+  structured,
+  setStructured,
+  result,
+  confirmed,
+  onConfirm,
+}: {
+  identity: Identity;
+  structured: StructuredWill;
+  setStructured: (w: StructuredWill) => void;
+  result: StructureResult;
+  confirmed: boolean;
+  onConfirm: () => void;
+}) {
+  const rules = runRules(structured, { identity, title_deed: null, ai_structured: result.ai_structured });
+  const blocks = rules.filter((r) => r.severity === "block");
+  const warns = rules.filter((r) => r.severity === "warn");
+
+  const setBeneficiary = (i: number, patch: Partial<StructuredWill["beneficiaries"][number]>) => {
+    const next = { ...structured, beneficiaries: [...structured.beneficiaries] };
+    next.beneficiaries[i] = { ...next.beneficiaries[i], ...patch };
+    setStructured(next);
+  };
 
   return (
     <div className="space-y-5">
-      <Labeled label="Any children under 21 residing in Dubai or Ras Al Khaimah?">
-        <div className="flex gap-2">
-          <Button
-            variant={hasChildren ? "sage" : "secondary"}
-            onClick={() =>
-              update({
-                has_children_under_21: true,
-                children:
-                  draft.children.length > 0
-                    ? draft.children
-                    : [
-                        {
-                          name: "",
-                          under_21: true,
-                          resides_in_dubai_or_rak: true,
-                        },
-                      ],
-              })
-            }
-          >
-            Yes
-          </Button>
-          <Button
-            variant={!hasChildren ? "sage" : "secondary"}
-            onClick={() =>
-              update({
-                has_children_under_21: false,
-                children: [],
-                guardians: [],
-              })
-            }
-          >
-            No
-          </Button>
+      <Card className={`p-4 ${result.source === "fallback" ? "border-amber/40 bg-amber/8" : "border-sage/30 bg-sage/6"}`}>
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          {result.source === "llm" ? (
+            <Pill tone="sage">LLM-structured</Pill>
+          ) : (
+            <MockLabel>Fallback — needs manual entry</MockLabel>
+          )}
         </div>
-      </Labeled>
+        <p className="mt-2 text-sm text-ink">{structured.distribution_summary}</p>
+        {structured.confidence_notes && (
+          <p className="mt-1 text-xs text-slate">
+            <strong>Model&apos;s notes:</strong> {structured.confidence_notes}
+          </p>
+        )}
+      </Card>
 
-      {hasChildren && (
-        <>
-          {draft.children.map((c, i) => (
-            <div key={i} className="flex gap-2">
+      <div>
+        <h3 className="text-sm font-semibold text-ink">Beneficiaries</h3>
+        <div className="mt-2 space-y-2">
+          {structured.beneficiaries.length === 0 && (
+            <p className="text-sm text-clay">
+              No beneficiaries were structured — add at least one below.
+            </p>
+          )}
+          {structured.beneficiaries.map((b, i) => (
+            <Card key={i} className="p-3">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <TextInput
+                  placeholder="Name"
+                  value={b.name}
+                  onChange={(e) => setBeneficiary(i, { name: e.target.value })}
+                />
+                <TextInput
+                  placeholder="Relationship"
+                  value={b.relationship}
+                  onChange={(e) => setBeneficiary(i, { relationship: e.target.value })}
+                />
+                <TextInput
+                  type="number"
+                  placeholder="%"
+                  value={String(b.share_pct)}
+                  onChange={(e) => setBeneficiary(i, { share_pct: Number(e.target.value) || 0 })}
+                />
+                <label className="flex items-center gap-1.5 text-xs text-slate">
+                  <input
+                    type="checkbox"
+                    checked={b.is_minor}
+                    onChange={(e) => setBeneficiary(i, { is_minor: e.target.checked })}
+                  />
+                  Minor
+                </label>
+              </div>
               <TextInput
-                placeholder="Child's name"
-                value={c.name}
-                onChange={(e) => {
-                  const children = [...draft.children];
-                  children[i] = { ...c, name: e.target.value };
-                  update({ children });
-                }}
+                className="mt-2"
+                placeholder="If they predecease me, their share goes to…"
+                value={b.substitution}
+                onChange={(e) => setBeneficiary(i, { substitution: e.target.value })}
               />
-              <Button
-                variant="ghost"
-                onClick={() =>
-                  update({
-                    children: draft.children.filter((_, x) => x !== i),
-                  })
-                }
-              >
-                Remove
-              </Button>
-            </div>
+            </Card>
           ))}
           <Button
             variant="secondary"
             onClick={() =>
-              update({
-                children: [
-                  ...draft.children,
-                  { name: "", under_21: true, resides_in_dubai_or_rak: true },
+              setStructured({
+                ...structured,
+                beneficiaries: [
+                  ...structured.beneficiaries,
+                  { name: "", relationship: "", share_pct: 0, is_minor: false, substitution: "", held_in_trust: false },
                 ],
               })
             }
           >
-            + Add child
+            + Add beneficiary
           </Button>
-
-          <div className="rounded-lg border border-amber/30 bg-amber/8 p-3 text-sm">
-            <div className="font-medium text-amber">Guardian nomination required</div>
-            <p className="mt-1 text-slate">
-              You nominate a guardian; the court retains final say on the
-              child&apos;s best interests — registration nominates, it
-              doesn&apos;t guarantee.
-            </p>
-          </div>
-
-          <Labeled label="Guardian">
-            <TextInput
-              placeholder="Guardian name"
-              value={draft.guardians.find((g) => g.role === "guardian")?.name ?? ""}
-              onChange={(e) => {
-                const others = draft.guardians.filter(
-                  (g) => g.role !== "guardian"
-                );
-                update({
-                  guardians: [
-                    {
-                      name: e.target.value,
-                      relationship: "",
-                      role: "guardian",
-                    },
-                    ...others,
-                  ],
-                });
-              }}
-            />
-          </Labeled>
-          <Labeled
-            label="Substitute guardian"
-            hint="If the first guardian can't act (predecease/substitution)."
-          >
-            <TextInput
-              placeholder="Substitute guardian name"
-              value={
-                draft.guardians.find((g) => g.role === "substitute_guardian")
-                  ?.name ?? ""
-              }
-              onChange={(e) => {
-                const others = draft.guardians.filter(
-                  (g) => g.role !== "substitute_guardian"
-                );
-                update({
-                  guardians: [
-                    ...others,
-                    {
-                      name: e.target.value,
-                      relationship: "",
-                      role: "substitute_guardian",
-                    },
-                  ],
-                });
-              }}
-            />
-          </Labeled>
-        </>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Step 2 — Assets
-// ---------------------------------------------------------------------------
-
-function AssetsStep({
-  draft,
-  update,
-}: {
-  draft: IntakeDraft;
-  update: (p: Partial<IntakeDraft>) => void;
-}) {
-  const addAsset = (asset_type: AssetType) =>
-    update({
-      assets: [
-        ...draft.assets,
-        {
-          asset_type,
-          emirate: asset_type === "property" ? "dubai" : "n_a",
-          description: "",
-        },
-      ],
-    });
-
-  return (
-    <div className="space-y-4">
-      <p className="text-sm text-slate">
-        Which UAE assets does this will cover? A DIFC will must cover at least
-        one UAE-situated asset.
-      </p>
-
-      <div className="flex flex-wrap gap-2">
-        <Button variant="secondary" onClick={() => addAsset("property")}>
-          + Property
-        </Button>
-        <Button variant="secondary" onClick={() => addAsset("bank_account")}>
-          + Bank account
-        </Button>
-        <Button variant="secondary" onClick={() => addAsset("business_shares")}>
-          + Business shares
-        </Button>
-      </div>
-
-      <div className="rounded-lg border border-slate/25 bg-slate/6 p-3 text-xs text-slate">
-        Bank accounts don&apos;t need to be individually listed or validated for a
-        Full Will — it covers all movable property as a category. (Only a
-        Financial Assets Will enumerates accounts, and that&apos;s out of scope.)
-      </div>
-
-      {draft.assets.map((a, i) => (
-        <Card key={i} className="p-4">
-          <div className="flex items-center justify-between">
-            <Pill tone="ink">
-              {a.asset_type.replace("_", " ")}
-            </Pill>
-            <button
-              className="text-xs text-slate underline"
-              onClick={() =>
-                update({ assets: draft.assets.filter((_, x) => x !== i) })
-              }
-            >
-              Remove
-            </button>
-          </div>
-          <div className="mt-3 grid grid-cols-1 gap-3">
-            <TextInput
-              placeholder="Description (e.g. Villa 12, Emirates Hills)"
-              value={a.description}
-              onChange={(e) => {
-                const assets = [...draft.assets];
-                assets[i] = { ...a, description: e.target.value };
-                update({ assets });
-              }}
-            />
-            {a.asset_type === "property" && (
-              <>
-                <Labeled label="Which emirate?">
-                  <Select
-                    value={a.emirate}
-                    onChange={(e) => {
-                      const assets = [...draft.assets];
-                      assets[i] = {
-                        ...a,
-                        emirate: e.target.value as Emirate,
-                      };
-                      update({ assets });
-                    }}
-                  >
-                    <option value="dubai">Dubai</option>
-                    <option value="rak">Ras Al Khaimah</option>
-                    <option value="abu_dhabi">Abu Dhabi</option>
-                    <option value="other">Other emirate</option>
-                  </Select>
-                </Labeled>
-                {(a.emirate === "abu_dhabi" || a.emirate === "other") && (
-                  <div className="rounded-lg border border-amber/40 bg-amber/8 p-3 text-sm">
-                    <SeverityBadge severity="warn" />{" "}
-                    <span className="text-slate">
-                      DIFC covers Dubai/RAK reliably. This property registers
-                      with the ADJD (Abu Dhabi Judicial Department) — jurisdiction
-                      follows the asset. Your DIFC will covers everything else; a
-                      lawyer scopes the two so they don&apos;t revoke each other.
-                    </span>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </Card>
-      ))}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Step 3 — Beneficiaries & executor
-// ---------------------------------------------------------------------------
-
-function BeneficiariesStep({
-  draft,
-  update,
-}: {
-  draft: IntakeDraft;
-  update: (p: Partial<IntakeDraft>) => void;
-}) {
-  const total = draft.beneficiaries.reduce((s, b) => s + (b.share_pct || 0), 0);
-  const exact = Math.round(total * 100) / 100 === 100;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium text-ink">Beneficiaries</span>
-        <span
-          className={`rounded-full px-3 py-1 text-sm font-semibold ${
-            exact ? "bg-sage/15 text-sage" : "bg-amber/15 text-amber"
-          }`}
-        >
-          {total}% allocated {exact ? "✓" : "/ 100%"}
-        </span>
-      </div>
-
-      {draft.beneficiaries.map((b, i) => (
-        <Card key={i} className="p-4">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <TextInput
-              placeholder="Name"
-              value={b.name}
-              onChange={(e) => {
-                const bs = [...draft.beneficiaries];
-                bs[i] = { ...b, name: e.target.value };
-                update({ beneficiaries: bs });
-              }}
-            />
-            <TextInput
-              placeholder="Relationship"
-              value={b.relationship}
-              onChange={(e) => {
-                const bs = [...draft.beneficiaries];
-                bs[i] = { ...b, relationship: e.target.value };
-                update({ beneficiaries: bs });
-              }}
-            />
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-slate">Share</span>
-              <TextInput
-                type="number"
-                className="w-24"
-                value={String(b.share_pct)}
-                onChange={(e) => {
-                  const bs = [...draft.beneficiaries];
-                  bs[i] = { ...b, share_pct: Number(e.target.value) || 0 };
-                  update({ beneficiaries: bs });
-                }}
-              />
-              <span className="text-sm text-slate">%</span>
-            </div>
-            <label className="flex items-center gap-2 text-sm text-slate">
-              <input
-                type="checkbox"
-                checked={b.is_minor}
-                onChange={(e) => {
-                  const bs = [...draft.beneficiaries];
-                  bs[i] = { ...b, is_minor: e.target.checked };
-                  update({ beneficiaries: bs });
-                }}
-              />
-              Under 21
-            </label>
-            <button
-              className="ml-auto text-xs text-slate underline"
-              onClick={() =>
-                update({
-                  beneficiaries: draft.beneficiaries.filter((_, x) => x !== i),
-                })
-              }
-            >
-              Remove
-            </button>
-          </div>
-          {b.is_minor && (
-            <div className="mt-2 rounded bg-amber/8 px-2 py-1.5 text-xs text-amber">
-              A minor can&apos;t inherit outright — this share needs a
-              trust/holding structure (a lawyer will confirm).
-            </div>
-          )}
-        </Card>
-      ))}
-
-      <Button
-        variant="secondary"
-        onClick={() =>
-          update({
-            beneficiaries: [
-              ...draft.beneficiaries,
-              {
-                name: "",
-                relationship: "",
-                share_pct: 0,
-                is_minor: false,
-                held_in_trust: false,
-                substitution: "",
-              },
-            ],
-          })
-        }
-      >
-        + Add beneficiary
-      </Button>
-
-      <Labeled
-        label="Describe the split in your own words (optional)"
-        hint="Our AI structures this into the will; a lawyer verifies it. e.g. “split evenly, but the rest to my kids if my wife has passed.”"
-      >
-        <textarea
-          className="w-full rounded-lg border border-hairline bg-white px-3 py-2.5 text-sm text-ink outline-none focus:border-slate focus:ring-2 focus:ring-slate/20"
-          rows={3}
-          value={draft.distribution_notes}
-          onChange={(e) => update({ distribution_notes: e.target.value })}
-        />
-      </Labeled>
-
-      <hr className="border-hairline" />
-
-      <Labeled label="Executor">
-        <TextInput
-          placeholder="Executor name"
-          value={draft.executors.find((e) => e.role === "executor")?.name ?? ""}
-          onChange={(e) => {
-            const others = draft.executors.filter((x) => x.role !== "executor");
-            update({
-              executors: [
-                { name: e.target.value, relationship: "", role: "executor" },
-                ...others,
-              ],
-            });
-          }}
-        />
-      </Labeled>
-      <Labeled label="Substitute executor (optional)">
-        <TextInput
-          placeholder="Substitute executor name"
-          value={
-            draft.executors.find((e) => e.role === "substitute_executor")
-              ?.name ?? ""
-          }
-          onChange={(e) => {
-            const others = draft.executors.filter(
-              (x) => x.role !== "substitute_executor"
-            );
-            update({
-              executors: [
-                ...others,
-                {
-                  name: e.target.value,
-                  relationship: "",
-                  role: "substitute_executor",
-                },
-              ],
-            });
-          }}
-        />
-      </Labeled>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Step 4 — Safety questions
-// ---------------------------------------------------------------------------
-
-function SafetyStep({
-  draft,
-  update,
-}: {
-  draft: IntakeDraft;
-  update: (p: Partial<IntakeDraft>) => void;
-}) {
-  return (
-    <div className="space-y-5">
-      <p className="text-sm text-slate">Two things people forget.</p>
-
-      <Card className="p-4">
-        <Labeled label="Do you have a will in another country (a foreign will)?">
-          <div className="flex gap-2">
-            <Button
-              variant={draft.has_foreign_will ? "sage" : "secondary"}
-              onClick={() => update({ has_foreign_will: true })}
-            >
-              Yes
-            </Button>
-            <Button
-              variant={!draft.has_foreign_will ? "sage" : "secondary"}
-              onClick={() =>
-                update({ has_foreign_will: false, foreign_will_detail: "" })
-              }
-            >
-              No
-            </Button>
-          </div>
-        </Labeled>
-        {draft.has_foreign_will && (
-          <div className="mt-3 space-y-2">
-            <TextInput
-              placeholder="Which country / what does it cover?"
-              value={draft.foreign_will_detail}
-              onChange={(e) =>
-                update({ foreign_will_detail: e.target.value })
-              }
-            />
-            <div className="rounded bg-amber/8 px-3 py-2 text-xs text-amber">
-              <SeverityBadge severity="warn" /> Revocation-clause risk. Your DIFC
-              will&apos;s revocation clause must be scoped to UAE assets only, or
-              it could void your foreign will. A lawyer will confirm.
-            </div>
-          </div>
-        )}
-      </Card>
-
-      <Card className="p-4">
-        <div className="text-sm font-medium text-ink">
-          If a beneficiary passes before you, where does their share go?
         </div>
-        <p className="mt-1 text-xs text-slate">
-          Substitution — set per beneficiary.
-        </p>
-        <div className="mt-3 space-y-3">
-          {draft.beneficiaries.length === 0 && (
-            <p className="text-sm text-slate">
-              Add beneficiaries in the previous step first.
-            </p>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Labeled label="Executor">
+          <TextInput
+            placeholder="Name"
+            value={structured.executor.name}
+            onChange={(e) => setStructured({ ...structured, executor: { ...structured.executor, name: e.target.value } })}
+          />
+        </Labeled>
+        <Labeled label="Executor relationship">
+          <TextInput
+            value={structured.executor.relationship}
+            onChange={(e) =>
+              setStructured({ ...structured, executor: { ...structured.executor, relationship: e.target.value } })
+            }
+          />
+        </Labeled>
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-ink">UAE assets</h3>
+        <div className="mt-2 space-y-2">
+          {structured.assets.length === 0 && (
+            <p className="text-sm text-clay">No UAE assets were structured — add at least one.</p>
           )}
-          {draft.beneficiaries.map((b, i) => (
-            <div key={i} className="flex items-center gap-3">
-              <span className="w-32 shrink-0 truncate text-sm text-ink">
-                {b.name || `Beneficiary ${i + 1}`}
-              </span>
+          {structured.assets.map((a, i) => (
+            <Card key={i} className="flex items-center gap-2 p-3">
               <Select
-                value={b.substitution}
+                value={a.type}
                 onChange={(e) => {
-                  const bs = [...draft.beneficiaries];
-                  bs[i] = { ...b, substitution: e.target.value };
-                  update({ beneficiaries: bs });
+                  const assets = [...structured.assets];
+                  assets[i] = { ...a, type: e.target.value as AssetType };
+                  setStructured({ ...structured, assets });
                 }}
               >
-                <option value="">Choose…</option>
-                <option value="to their children/issue in equal shares">
-                  To their children / issue
-                </option>
-                <option value="to my other beneficiaries proportionally">
-                  To my other beneficiaries
-                </option>
-                <option value="to the residuary estate">
-                  To the residuary estate
-                </option>
+                <option value="property">Property</option>
+                <option value="bank_account">Bank account</option>
+                <option value="business_shares">Business shares</option>
+                <option value="other">Other</option>
               </Select>
-            </div>
+              {a.type === "property" && (
+                <Select
+                  value={a.emirate}
+                  onChange={(e) => {
+                    const assets = [...structured.assets];
+                    const emirate = e.target.value as Emirate;
+                    assets[i] = {
+                      ...a,
+                      emirate,
+                      needs_adjd: emirate === "abu_dhabi" || emirate === "other",
+                    };
+                    setStructured({ ...structured, assets });
+                  }}
+                >
+                  <option value="dubai">Dubai</option>
+                  <option value="rak">Ras Al Khaimah</option>
+                  <option value="abu_dhabi">Abu Dhabi</option>
+                  <option value="other">Other emirate</option>
+                </Select>
+              )}
+              <TextInput
+                placeholder="Description"
+                value={a.description}
+                onChange={(e) => {
+                  const assets = [...structured.assets];
+                  assets[i] = { ...a, description: e.target.value };
+                  setStructured({ ...structured, assets });
+                }}
+              />
+            </Card>
           ))}
+          <Button
+            variant="secondary"
+            onClick={() =>
+              setStructured({
+                ...structured,
+                assets: [...structured.assets, { type: "property", emirate: "dubai", needs_adjd: false, description: "" }],
+              })
+            }
+          >
+            + Add asset
+          </Button>
         </div>
-      </Card>
+      </div>
+
+      {warns.length > 0 && (
+        <div className="rounded-lg border border-hairline bg-white p-4">
+          <div className="text-sm font-medium text-ink">What the lawyer will weigh in on</div>
+          <ul className="mt-2 space-y-2">
+            {warns.map((w, i) => (
+              <li key={i} className="flex items-start gap-2 text-sm">
+                <SeverityBadge severity="warn" />
+                <span className="text-slate">{w.detail}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {blocks.length > 0 && (
+        <div className="rounded-lg border border-clay/40 bg-clay/8 p-3 text-sm text-clay">
+          <div className="font-medium">Fix before continuing</div>
+          <ul className="mt-1 list-disc pl-5">
+            {blocks.map((b, i) => (
+              <li key={i}>{b.detail}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <Button className="w-full" disabled={blocks.length > 0 || confirmed} onClick={onConfirm}>
+        {confirmed ? "Confirmed ✓" : "This looks right — continue →"}
+      </Button>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Step 5 — Documents (deferrable — never gatekeeps)
+// Step 3 — Documents (deferrable — never gatekeeps)
 // ---------------------------------------------------------------------------
 
 function DocumentsStep({
   draft,
   update,
   willId,
+  identity,
 }: {
   draft: IntakeDraft;
   update: (p: Partial<IntakeDraft>) => void;
   willId: string;
+  identity: Identity;
 }) {
-  const hasProperty = draft.assets.some((a) => a.asset_type === "property");
+  const db = getDB();
+  const will = db.wills.find((w) => w.id === willId);
+  const hasProperty = (will?.structured_json?.assets ?? []).some((a) => a.type === "property");
   const isResident = draft.residency_status === "resident";
 
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-sage/30 bg-sage/8 p-3 text-sm text-sage">
-        Nothing here blocks you — skip for now and we&apos;ll email a secure
-        link. Your will&apos;s content is already locked in and reviewable. (A
-        lawyer simply can&apos;t approve until documents are in.)
+        Nothing here blocks you — skip for now and we&apos;ll email a secure link. Your
+        will&apos;s content is already locked in and reviewable. (A lawyer simply
+        can&apos;t approve until documents are in.)
       </div>
 
       {isResident && (
-        <DocCaptureRow
-          title="Emirates ID"
-          subtitle="Reads your address and cross-checks the name against your passport."
-          uploaded={draft.emirates_id.uploaded}
-        >
+        <DocCaptureRow title="Emirates ID" subtitle="Reads your address and cross-checks the name against your passport." uploaded={draft.emirates_id.uploaded}>
           <ImageCapture<EmiratesIdExtract>
             docType="emirates_id"
             label="Emirates ID"
-            onExtracted={({ extracted }) => {
+            onExtracted={async ({ extracted, file }) => {
               update({
                 emirates_id: {
                   uploaded: true,
-                  ocr: {
-                    full_name: extracted.full_name,
-                    address: extracted.address || "",
-                  },
+                  ocr: { full_name: extracted.full_name, address: extracted.address || "" },
                   number: extracted.id_number,
                 },
               });
-              const match =
-                compareNames(extracted.full_name, draft.passport.full_name) ===
-                "match"
-                  ? "match"
-                  : "needs_review";
-              upsertDocument(willId, {
-                doc_type: "emirates_id",
+              const match = compareNames(extracted.full_name, identity.full_name) === "match" ? "match" : "needs_review";
+              const stored = await uploadDocumentFile(willId, "emirates_id", file);
+              recordDocument(willId, "emirates_id", {
                 status: "validated",
                 ocr_extracted: { ...extracted },
                 match_result: match,
+                file_path: stored.file_path,
+                file_url: stored.file_url,
+                expires_at: stored.expires_at,
                 uploaded_at: new Date().toISOString(),
                 validated_at: new Date().toISOString(),
               });
@@ -1017,29 +800,22 @@ function DocumentsStep({
       )}
 
       {hasProperty && (
-        <DocCaptureRow
-          title="Title deed"
-          subtitle="Reads the owner and flags joint ownership (the gift may not pass the whole asset)."
-          uploaded={draft.title_deed.uploaded}
-        >
+        <DocCaptureRow title="Title deed" subtitle="Reads the owner and flags joint ownership (the gift may not pass the whole asset)." uploaded={draft.title_deed.uploaded}>
           <ImageCapture<TitleDeedExtract>
             docType="title_deed"
             label="title deed"
-            onExtracted={({ extracted }) => {
+            onExtracted={async ({ extracted, file }) => {
               update({
-                title_deed: {
-                  uploaded: true,
-                  ocr: {
-                    owner: extracted.owner_name,
-                    joint_owner: extracted.joint_owner,
-                  },
-                },
+                title_deed: { uploaded: true, ocr: { owner: extracted.owner_name, joint_owner: extracted.joint_owner } },
               });
-              upsertDocument(willId, {
-                doc_type: "title_deed",
+              const stored = await uploadDocumentFile(willId, "title_deed", file);
+              recordDocument(willId, "title_deed", {
                 status: "validated",
                 ocr_extracted: { ...extracted },
                 match_result: extracted.joint_owner ? "needs_review" : "match",
+                file_path: stored.file_path,
+                file_url: stored.file_url,
+                expires_at: stored.expires_at,
                 uploaded_at: new Date().toISOString(),
                 validated_at: new Date().toISOString(),
               });
@@ -1050,8 +826,7 @@ function DocumentsStep({
 
       {!isResident && !hasProperty && (
         <p className="text-sm text-slate">
-          No supporting documents required at this step for your case. You can
-          continue.
+          No supporting documents required at this step for your case. You can continue.
         </p>
       )}
     </div>
@@ -1073,11 +848,7 @@ function DocCaptureRow({
     <Card className="p-4">
       <div className="flex items-center gap-2">
         <span className="font-medium text-ink">{title}</span>
-        {uploaded ? (
-          <Pill tone="sage">Uploaded</Pill>
-        ) : (
-          <Pill tone="amber">Upload later ok</Pill>
-        )}
+        {uploaded ? <Pill tone="sage">Uploaded</Pill> : <Pill tone="amber">Upload later ok</Pill>}
       </div>
       <p className="mt-1 text-xs text-slate">{subtitle}</p>
       {!uploaded && <div className="mt-3">{children}</div>}
@@ -1086,135 +857,75 @@ function DocCaptureRow({
 }
 
 // ---------------------------------------------------------------------------
-// Step 6 — Review & submit
+// Step 4 — Review & submit
 // ---------------------------------------------------------------------------
-
-function clientRules(
-  draft: IntakeDraft,
-  structured: StructuredWill,
-  ai: boolean
-): RuleResult[] {
-  return runRules(structured, {
-    passport_ocr_name: draft.passport.ocr?.full_name ?? draft.passport.full_name,
-    passport_uploaded: draft.passport.uploaded,
-    title_deed: draft.title_deed.uploaded
-      ? {
-          uploaded: true,
-          owner: draft.title_deed.ocr?.owner,
-          joint_owner: draft.title_deed.ocr?.joint_owner,
-        }
-      : null,
-    ai_structured: ai,
-  });
-}
 
 function ReviewStep({
   draft,
+  identity,
   structured,
-  structuring,
-  result,
+  aiStructured,
   submitted,
-  onStructure,
   onSubmit,
 }: {
   draft: IntakeDraft;
-  structured: StructuredWill;
-  structuring: boolean;
-  result: StructureResult | null;
+  identity: Identity;
+  structured: StructuredWill | null;
+  aiStructured: boolean;
   submitted: boolean;
-  onStructure: () => void;
   onSubmit: (documentsPending: boolean) => void;
 }) {
-  const rules = clientRules(draft, structured, result?.ai_structured ?? false);
+  if (!structured) return null;
+
+  const rules = runRules(structured, {
+    identity,
+    title_deed: draft.title_deed.uploaded
+      ? { uploaded: true, owner: draft.title_deed.ocr?.owner, joint_owner: draft.title_deed.ocr?.joint_owner }
+      : null,
+    ai_structured: aiStructured,
+  });
   const blocks = rules.filter((r) => r.severity === "block");
   const warns = rules.filter((r) => r.severity === "warn");
 
-  const isResident = draft.residency_status === "resident";
-  const hasProperty = draft.assets.some((a) => a.asset_type === "property");
-  const hasChildren = draft.children.length > 0;
-  const docsPending =
-    (isResident && !draft.emirates_id.uploaded) ||
-    (hasProperty && !draft.title_deed.uploaded);
+  const isResident = identity.residency_status === "resident";
+  const hasProperty = structured.assets.some((a) => a.type === "property");
+  const docsPending = (isResident && !draft.emirates_id.uploaded) || (hasProperty && !draft.title_deed.uploaded);
 
-  const checklist: Array<{
-    label: string;
-    status: "done" | "optional" | "later" | "fix";
-  }> = [
-    {
-      label: "Identity — valid passport",
-      status:
-        draft.passport.uploaded &&
-        new Date(draft.passport.passport_expiry) > new Date()
-          ? "done"
-          : "fix",
-    },
-    {
-      label: "At least one UAE asset",
-      status: draft.assets.length ? "done" : "fix",
-    },
+  const checklist: Array<{ label: string; status: "done" | "later" | "fix" }> = [
+    { label: "Identity — valid passport", status: draft.passport.uploaded && !identity.passport_expired ? "done" : "fix" },
+    { label: "At least one UAE asset", status: structured.assets.length ? "done" : "fix" },
     {
       label: "Beneficiary shares total 100%",
       status:
-        Math.round(
-          draft.beneficiaries.reduce((s, b) => s + (b.share_pct || 0), 0) * 100
-        ) /
-          100 ===
-        100
+        Math.round(structured.beneficiaries.reduce((s, b) => s + (b.share_pct || 0), 0) * 100) / 100 === 100
           ? "done"
           : "fix",
     },
-    {
-      label: "Executor appointed",
-      status: draft.executors.some((e) => e.role === "executor")
-        ? "done"
-        : "fix",
-    },
-    ...(hasChildren
-      ? [
-          {
-            label: "Guardian nominated",
-            status: draft.guardians.some((g) => g.role === "guardian")
-              ? ("done" as const)
-              : ("fix" as const),
-          },
-        ]
-      : []),
-    ...(isResident
-      ? [
-          {
-            label: "Emirates ID",
-            status: draft.emirates_id.uploaded
-              ? ("done" as const)
-              : ("later" as const),
-          },
-        ]
-      : []),
-    ...(hasProperty
-      ? [
-          {
-            label: "Title deed",
-            status: draft.title_deed.uploaded
-              ? ("done" as const)
-              : ("later" as const),
-          },
-        ]
-      : []),
+    { label: "Executor appointed", status: structured.executor.name ? "done" : "fix" },
   ];
+  if (structured.guardian !== null || structured.beneficiaries.some((b) => b.is_minor)) {
+    checklist.push({ label: "Guardian nominated (if children)", status: structured.guardian ? "done" : "later" });
+  }
+  if (isResident) {
+    checklist.push({ label: "Emirates ID", status: draft.emirates_id.uploaded ? "done" : "later" });
+  }
+  if (hasProperty) {
+    checklist.push({ label: "Title deed", status: draft.title_deed.uploaded ? "done" : "later" });
+  }
 
   if (submitted) {
     return (
       <div className="rounded-xl2 border border-sage/40 bg-sage/8 p-6 text-center">
         <div className="text-3xl">✓</div>
-        <h3 className="mt-2 font-serif text-xl text-ink">
-          Submitted to the lawyer queue
-        </h3>
+        <h3 className="mt-2 font-serif text-xl text-ink">Submitted to the lawyer queue</h3>
         <p className="mt-1 text-sm text-slate">
           {docsPending
             ? "Your will's content is locked in. We'll email a secure link for the outstanding documents — the lawyer can review the content now."
             : "Your will is complete and queued for lawyer review."}
         </p>
         <p className="mt-3 text-xs text-slate">
-          Switch to the <strong>Lawyer review</strong> tab to see it arrive.
+          Switch to the <strong>Lawyer review</strong> tab to see it arrive. After the
+          lawyer approves, you&apos;ll return here for final approval before registration.
         </p>
       </div>
     );
@@ -1223,21 +934,13 @@ function ReviewStep({
   return (
     <div className="space-y-5">
       <div>
-        <h3 className="text-sm font-medium text-ink">
-          Everything a submittable will needs
-        </h3>
+        <h3 className="text-sm font-medium text-ink">Everything a submittable will needs</h3>
         <ul className="mt-2 space-y-1.5">
           {checklist.map((c) => (
-            <li
-              key={c.label}
-              className="flex items-center justify-between rounded-lg bg-white px-3 py-2 text-sm"
-            >
+            <li key={c.label} className="flex items-center justify-between rounded-lg bg-white px-3 py-2 text-sm">
               <span className="text-ink">{c.label}</span>
               {c.status === "done" && <Pill tone="sage">Done ✓</Pill>}
-              {c.status === "optional" && <Pill tone="slate">Optional</Pill>}
-              {c.status === "later" && (
-                <Pill tone="amber">Upload later — ok</Pill>
-              )}
+              {c.status === "later" && <Pill tone="amber">Upload later — ok</Pill>}
               {c.status === "fix" && <Pill tone="clay">Needs fixing</Pill>}
             </li>
           ))}
@@ -1255,32 +958,9 @@ function ReviewStep({
         </div>
       )}
 
-      <div className="rounded-lg border border-hairline bg-white p-4">
-        <div className="flex items-center justify-between">
-          <div className="text-sm font-medium text-ink">
-            AI structuring &amp; what the lawyer will weigh in on
-          </div>
-          <Button
-            variant="secondary"
-            onClick={onStructure}
-            disabled={structuring}
-          >
-            {structuring
-              ? "Structuring…"
-              : result
-              ? "Re-run structuring"
-              : "Run AI structuring"}
-          </Button>
-        </div>
-        {result && (
-          <div className="mt-2 rounded bg-paper-deep/50 px-3 py-2 text-xs text-slate">
-            <span className="font-semibold">
-              {result.source === "llm" ? "LLM" : "Deterministic"} structuring:
-            </span>{" "}
-            {result.note}
-          </div>
-        )}
-        {warns.length > 0 ? (
+      {warns.length > 0 && (
+        <div className="rounded-lg border border-hairline bg-white p-4">
+          <div className="text-sm font-medium text-ink">What the lawyer will weigh in on</div>
           <ul className="mt-3 space-y-2">
             {warns.map((w, i) => (
               <li key={i} className="flex items-start gap-2 text-sm">
@@ -1289,35 +969,22 @@ function ReviewStep({
               </li>
             ))}
           </ul>
-        ) : (
-          <p className="mt-3 text-sm text-slate">
-            No judgment items flagged yet — a clean standard case.
-          </p>
-        )}
-      </div>
+        </div>
+      )}
 
       <div className="space-y-2">
         {docsPending ? (
           <>
-            <Button
-              className="w-full"
-              disabled={blocks.length > 0}
-              onClick={() => onSubmit(true)}
-            >
+            <Button className="w-full" disabled={blocks.length > 0} onClick={() => onSubmit(true)}>
               Submit now, finish documents later →
             </Button>
             <p className="text-center text-xs text-slate">
-              Sends to the lawyer queue in a <em>documents-pending</em> state.
-              Documents never block submission.
+              Sends to the lawyer queue in a <em>documents-pending</em> state. Documents
+              never block submission.
             </p>
           </>
         ) : (
-          <Button
-            className="w-full"
-            variant="sage"
-            disabled={blocks.length > 0}
-            onClick={() => onSubmit(false)}
-          >
+          <Button className="w-full" variant="sage" disabled={blocks.length > 0} onClick={() => onSubmit(false)}>
             Submit for lawyer review →
           </Button>
         )}
@@ -1333,54 +1000,46 @@ function ReviewStep({
 function StepNav({
   step,
   draft,
-  structured,
+  confirmed,
+  structuring,
   submitted,
   onBack,
   onNext,
 }: {
   step: number;
   draft: IntakeDraft;
-  structured: StructuredWill;
+  confirmed: boolean;
+  structuring: boolean;
   submitted: boolean;
   onBack: () => void;
   onNext: () => void;
 }) {
-  // Content-only gating (never documents).
   let blockReason: string | null = null;
   if (step === 0) {
     if (!draft.passport.uploaded) blockReason = "Scan your passport to continue.";
     else if (new Date(draft.passport.passport_expiry) < new Date())
       blockReason = "Passport is expired — provide a valid one.";
-    else if (draft.residency_status === "unknown")
-      blockReason = "Tell us your residency status.";
+    else if (draft.residency_status === "unknown") blockReason = "Tell us your residency status.";
   }
-  if (step === 2 && draft.assets.length === 0)
-    blockReason = "Add at least one UAE asset.";
-  if (step === 3) {
-    const total = draft.beneficiaries.reduce((s, b) => s + (b.share_pct || 0), 0);
-    if (Math.round(total * 100) / 100 !== 100)
-      blockReason = "Beneficiary shares must total 100%.";
-    else if (!draft.executors.some((e) => e.role === "executor"))
-      blockReason = "Appoint an executor.";
-  }
+  // Step 1 (wishes) advances automatically once structuring completes.
+  // Step 2 (confirm) advances via its own "continue" button.
 
   if (submitted) return null;
+  const hideNext = step === 1 || step === 2 || structuring;
 
   return (
     <div className="mt-8 flex items-center justify-between border-t border-hairline pt-5">
       <Button variant="ghost" onClick={onBack} disabled={step === 0}>
         ← Back
       </Button>
-      {step < STEPS.length - 1 ? (
+      {!hideNext && step < STEPS.length - 1 && (
         <div className="flex flex-col items-end gap-1">
-          <Button onClick={onNext} disabled={!!blockReason}>
+          <Button onClick={onNext} disabled={!!blockReason || (step === 2 && !confirmed)}>
             Continue →
           </Button>
-          {blockReason && (
-            <span className="text-xs text-clay">{blockReason}</span>
-          )}
+          {blockReason && <span className="text-xs text-clay">{blockReason}</span>}
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
