@@ -827,7 +827,11 @@ function PostApproval({ will }: { will: Will }) {
 function labelForCheck(key: Check["check_key"]): string {
   const map: Partial<Record<Check["check_key"], string>> = {
     executor_missing: "No executor named",
+    executor_relationship_missing: "Executor relationship not stated",
     beneficiary_incomplete: "Beneficiary missing a name",
+    beneficiary_relationship_missing: "Beneficiary relationship not stated",
+    property_address_missing: "Property missing an address",
+    guardian_for_minor_missing: "No guardian for a minor child",
     name_mismatch: "Passport / will name mismatch",
     minor_no_trust: "Minor inheriting without a trust",
     duplicate_beneficiary: "Duplicate beneficiary",

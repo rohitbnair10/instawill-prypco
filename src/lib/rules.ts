@@ -124,6 +124,21 @@ export function runRules(will: StructuredWill, ctx: RuleContext): RuleResult[] {
     });
   }
 
+  // Property needs an identifying address/description — a gift of "[blank]"
+  // isn't registrable. Bank accounts and movables don't need enumeration (a
+  // Full Will covers movables as a category), so this only targets property.
+  const namelessProperty = will.assets.filter(
+    (a) => a.type === "property" && !a.description?.trim()
+  );
+  if (namelessProperty.length) {
+    out.push({
+      check_key: "property_address_missing",
+      severity: "block",
+      owner: "client",
+      detail: `${namelessProperty.length} property asset(s) have no address/description — a property gift must identify the property (address, unit, or title-deed reference).`,
+    });
+  }
+
   // Shares total 100%.
   const total = will.beneficiaries.reduce((s, b) => s + (b.share_pct || 0), 0);
   if (Math.round(total * 100) / 100 !== 100) {
@@ -162,6 +177,17 @@ export function runRules(will: StructuredWill, ctx: RuleContext): RuleResult[] {
       owner: "client",
       detail: `Executor appointed (${will.executor.name}).`,
     });
+    // Relationship to the executor is a portal field (Step 4) a lawyer needs.
+    // Flagged, not blocked — the name identifies the person; missing
+    // relationship is a completeness gap the client can fill at intake.
+    if (!will.executor.relationship?.trim()) {
+      out.push({
+        check_key: "executor_relationship_missing",
+        severity: "warn",
+        owner: "client",
+        detail: `No relationship stated for executor ${will.executor.name} — confirm how they relate to you (e.g. brother, wife, friend).`,
+      });
+    }
   }
 
   // Every beneficiary needs a name — a share with no named recipient is not a
@@ -175,6 +201,22 @@ export function runRules(will: StructuredWill, ctx: RuleContext): RuleResult[] {
       owner: "client",
       detail: `${nameless.length} beneficiary(ies) have a share but no name — name every beneficiary before submitting.`,
     });
+  }
+
+  // Beneficiary relationship is a portal field (Step 5) and helps identify the
+  // person. Flagged (not blocked) for each named beneficiary missing it.
+  const missingRelationship = will.beneficiaries.filter(
+    (b) => b.name?.trim() && !b.relationship?.trim()
+  );
+  if (missingRelationship.length) {
+    missingRelationship.forEach((b) =>
+      out.push({
+        check_key: "beneficiary_relationship_missing",
+        severity: "warn",
+        owner: "client",
+        detail: `No relationship stated for beneficiary ${b.name} — confirm how they relate to you (e.g. wife, son, friend, charity).`,
+      })
+    );
   }
 
   // Minor beneficiary with no trust/holding structure. This is a hard
@@ -314,6 +356,25 @@ export function runRules(will: StructuredWill, ctx: RuleContext): RuleResult[] {
       detail: `AI-structured from free text ("${will.distribution_summary}"). Model's notes: ${
         will.confidence_notes?.trim() || "(none)"
       }. Verify this matches the client's intent before approval.`,
+    });
+  }
+
+  // Minor CHILD inheriting but no guardian nominated. Limited to the testator's
+  // own children (son/daughter/child/kids) — a minor niece/grandchild doesn't
+  // imply the testator is the guardian-nominator. Flagged so the client can
+  // add a guardian at intake; the court retains final say either way.
+  const CHILD_REL = /\b(son|sons|daughter|daughters|child|children|kid|kids)\b/i;
+  const minorChildren = will.beneficiaries.filter(
+    (b) => b.is_minor && CHILD_REL.test(b.relationship || "")
+  );
+  if (minorChildren.length && !will.guardian) {
+    out.push({
+      check_key: "guardian_for_minor_missing",
+      severity: "warn",
+      owner: "client",
+      detail: `A minor child (${minorChildren
+        .map((b) => b.name)
+        .join(", ")}) is inheriting but no guardian is named — nominate a guardian for your minor children.`,
     });
   }
 

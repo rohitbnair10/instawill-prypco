@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "demo:pipe": "tsx scripts/demo-pipe.ts"
+    "demo:pipe": "tsx scripts/demo-pipe.ts",
+    "qa": "tsx scripts/qa-structuring.ts"
   },
   "dependencies": {
     "@react-pdf/renderer": "3.4.4",

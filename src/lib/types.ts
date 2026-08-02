@@ -107,7 +107,10 @@ export type CheckKey =
   | "passport_expired"
   | "passport_missing"
   | "executor_missing"
+  | "executor_relationship_missing"
   | "beneficiary_incomplete"
+  | "beneficiary_relationship_missing"
+  | "property_address_missing"
   | "minor_no_trust"
   | "duplicate_beneficiary"
   | "adjd_routing"
@@ -118,6 +121,7 @@ export type CheckKey =
   | "witness_is_beneficiary"
   | "ai_distribution"
   | "guardian_needed"
+  | "guardian_for_minor_missing"
   | "substitution_missing"
   | "non_resident_path";
 
