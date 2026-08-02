@@ -450,7 +450,9 @@ function addPendingClientApprovalCase(d: DB) {
     lawyer_id: LAWYER.id,
     started_at: iso(2),
     ended_at: ts,
-    duration_seconds: 11 * 60,
+    active_seconds: 11 * 60,
+    clarification_wait_seconds: 0,
+    paused_at: null,
     outcome: "approved",
     items_total: 1,
     items_cleared: 1,
@@ -627,7 +629,9 @@ function addHistoricalRegistered(
     lawyer_id: LAWYER.id,
     started_at: iso(daysAgo + 2),
     ended_at: iso(daysAgo + 2),
-    duration_seconds: durationSeconds,
+    active_seconds: durationSeconds,
+    clarification_wait_seconds: 0,
+    paused_at: null,
     outcome: "approved",
     items_total: complexity === "complex" ? 3 : 1,
     items_cleared: complexity === "complex" ? 3 : 1,
@@ -652,17 +656,205 @@ function addHistoricalRegistered(
 }
 
 // ---------------------------------------------------------------------------
+// Clarifications (§1B-ter) demo scenarios
+// ---------------------------------------------------------------------------
+
+/** Attaches an ANSWERED (not yet resolved) clarification to an existing case's
+ * check — so opening the Lawyer desk immediately shows a "Client responded"
+ * blurb once that item unlocks, without requiring manual setup first. */
+function addAnsweredClarification(
+  d: DB,
+  willId: string,
+  checkKey: string,
+  question: string,
+  responseText: string
+) {
+  const check = d.checks.find((c) => c.will_id === willId && c.check_key === checkKey);
+  if (!check) return;
+  const sentAt = iso(1);
+  const answeredAt = iso(0.5);
+  d.clarifications.push({
+    id: uid(),
+    will_id: willId,
+    check_id: check.id,
+    raised_by: LAWYER.id,
+    mode: "question",
+    question,
+    doc_type: null,
+    message_preview: `Hi — quick one from your InstaWill lawyer: ${question}`,
+    message_final: `Hi — quick one from your InstaWill lawyer: ${question}`,
+    channel: "email",
+    status: "answered",
+    response_text: responseText,
+    response_file_path: null,
+    sent_at: sentAt,
+    answered_at: answeredAt,
+    resolved_at: null,
+    ops_followed_up: false,
+  });
+  d.events.push(
+    { id: uid(), will_id: willId, lead_id: null, event_type: "clarification_raised", payload: { check_key: checkKey }, created_at: sentAt },
+    { id: uid(), will_id: willId, lead_id: null, event_type: "clarification_answered", payload: { check_key: checkKey }, created_at: answeredAt }
+  );
+}
+
+/** A case currently `awaiting_client` with one OPEN clarification — populates
+ * the lawyer's "awaiting client" queue section, the ops read-only tab, and
+ * the client's "your lawyer has a question" picker, all on first load. */
+function addAwaitingClarificationCase(d: DB) {
+  const leadId = uid();
+  const willId = uid();
+  const sentAt = iso(0.25); // ~6 hours ago
+
+  const identity: Identity = {
+    full_name: "Fatima Hassan",
+    passport_number: "F5523190",
+    passport_expiry: futureDate(4),
+    passport_expired: false,
+    nationality: "Jordanian",
+    residency_status: "resident",
+    emirates_id_number: "784-1983-4455667-8",
+    emirates_id_address: "Jumeirah Village Circle, Dubai",
+  };
+  const structured: StructuredWill = {
+    testator: { name: "Fatima Hassan", nationality: "Jordanian", residency: "resident" },
+    beneficiaries: [
+      { name: "Yousef Hassan", relationship: "husband", share_pct: 100, is_minor: false, substitution: "to their children equally", held_in_trust: false },
+    ],
+    executor: { name: "Yousef Hassan", relationship: "husband" },
+    substitute_executor: null,
+    guardian: null,
+    substitute_guardian: null,
+    assets: [{ type: "property", emirate: "dubai", needs_adjd: false, description: "Apartment, JVC, Dubai" }],
+    foreign_will: false,
+    distribution_summary: "Entire UAE estate to husband Yousef.",
+    confidence_notes: "",
+  };
+
+  const lead: Lead = {
+    id: leadId,
+    created_at: iso(3),
+    updated_at: sentAt,
+    full_name: "Fatima Hassan",
+    email: "fatima.hassan@example.com",
+    phone: "+971 50 777 8899",
+    preferred_channel: "whatsapp",
+    residency_status: "resident",
+    current_stage: "awaiting_client",
+    stage_updated_at: sentAt,
+    recoverability: "high",
+    assigned_agent_id: null,
+  };
+  const will: Will = {
+    id: willId,
+    lead_id: leadId,
+    created_at: iso(3),
+    updated_at: sentAt,
+    will_type: "full",
+    jurisdiction: "difc",
+    status: "awaiting_client",
+    identity,
+    structured_json: structured,
+    structured_json_pre_lawyer: clone(structured),
+    raw_input_text: "Everything to my husband Yousef. We own an apartment in JVC together.",
+    ai_structured: false,
+    ai_confidence_notes: "",
+    lawyer_made_changes: false,
+    content_complete_at: iso(2),
+    submitted_at: iso(2),
+  };
+
+  d.leads.push(lead);
+  d.wills.push(will);
+  structured.beneficiaries.forEach((b) => d.beneficiaries.push({ id: uid(), will_id: willId, ...b }));
+  structured.assets.forEach((a) =>
+    d.assets.push({ id: uid(), will_id: willId, asset_type: a.type, emirate: a.emirate, needs_adjd: a.needs_adjd, description: a.description })
+  );
+  d.executors.push({ id: uid(), will_id: willId, role: "executor", ...structured.executor });
+
+  const rules = runRules(structured, {
+    identity,
+    title_deed: { uploaded: true, owner: "Fatima Hassan", joint_owner: true },
+    ai_structured: false,
+  });
+  rules.forEach((r) =>
+    d.checks.push({
+      id: uid(),
+      will_id: willId,
+      check_key: r.check_key,
+      severity: r.severity,
+      owner: r.owner,
+      detail: r.detail,
+      created_at: iso(2),
+      resolved_at: null,
+      resolved_by: null,
+    })
+  );
+  const jointOwnerCheck = d.checks.find((c) => c.will_id === willId && c.check_key === "deed_joint_owner");
+
+  const question = "Your title deed shows joint ownership — can you confirm the exact split (e.g. 50/50) so we can scope the gift correctly?";
+  d.clarifications.push({
+    id: uid(),
+    will_id: willId,
+    check_id: jointOwnerCheck?.id ?? null,
+    raised_by: LAWYER.id,
+    mode: "question",
+    question,
+    doc_type: null,
+    message_preview: `Hi Fatima — quick one from your InstaWill lawyer: ${question}`,
+    message_final: `Hi Fatima — quick one from your InstaWill lawyer: ${question}`,
+    channel: "whatsapp",
+    status: "sent",
+    response_text: null,
+    response_file_path: null,
+    sent_at: sentAt,
+    answered_at: null,
+    resolved_at: null,
+    ops_followed_up: false,
+  });
+
+  d.review_sessions.push({
+    id: uid(),
+    will_id: willId,
+    lawyer_id: LAWYER.id,
+    started_at: iso(2),
+    ended_at: null,
+    active_seconds: null,
+    clarification_wait_seconds: 0,
+    paused_at: sentAt,
+    outcome: "raised_clarification",
+    items_total: rules.filter((r) => r.severity === "warn").length,
+    items_cleared: 0,
+    case_complexity: "standard",
+  });
+
+  d.events.push(
+    { id: uid(), lead_id: leadId, will_id: willId, event_type: "will_submitted", payload: {}, created_at: iso(2) },
+    { id: uid(), lead_id: leadId, will_id: willId, event_type: "review_started", payload: { lawyer_id: LAWYER.id }, created_at: iso(2) },
+    { id: uid(), lead_id: leadId, will_id: willId, event_type: "clarification_raised", payload: {}, created_at: sentAt }
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 export function seedDatabase(d: DB) {
   d.users.push(LAWYER, AGENT, ADMIN);
 
-  addLawyerCase(d, sarahCase());
+  const sarah = addLawyerCase(d, sarahCase());
+  addAnsweredClarification(
+    d,
+    sarah.willId,
+    "name_mismatch",
+    "Your passport reads 'Sarah A. Whitfield' but the will names 'Sarah Anne Whitfield' — can you confirm 'Anne' is your full middle name?",
+    "Yes, that's me — Anne is my middle name, I just abbreviated it on the passport renewal form."
+  );
   addLawyerCase(d, menonCase());
   addLawyerCase(d, okoroCase());
   addLawyerCase(d, vossCase());
   addPendingClientApprovalCase(d);
+  addAwaitingClarificationCase(d);
 
   addStalledLead(d, {
     full_name: "Ahmed Rahman",

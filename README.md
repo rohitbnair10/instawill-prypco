@@ -79,6 +79,9 @@ URL (`src/lib/storage.ts`).
 client submits (identity + one free-text wishes field)
   → real LLM call structures it → rules engine flags issues
   → lawyer reviews, amends, approves            (validity)
+      ↕ optionally: lawyer raises a clarification mid-review (§1B-ter) —
+        case pauses on `awaiting_client`, client answers via a secure link,
+        returns to the lawyer at the same item
   → CLIENT reviews the final draft + what the lawyer changed
   → client approves                              (intent/consent)
   → portal-ready package + document links generate
@@ -106,10 +109,17 @@ at registration — they need to see what changed before they do.
   ordered judgment items with **enforced ordering**, a **gated Approve**
   button that sends the case to the client (not straight to the portal), and
   after client approval, the **Portal-Ready Package** with a real generated
-  draft-will PDF.
-- **Re-engagement (Ops)** — recovers started-but-not-submitted intakes, sorted
-  by how long they're stuck, with recoverability, a funnel bar, a "what's
-  blocking them" reason, preferred channel, and three logged recovery actions.
+  draft-will PDF. On any item, **"Ask the client"** (§1B-ter) raises a
+  clarification instead of clearing it — the LLM drafts a message, the lawyer
+  previews/edits, one-click sends it as a secure link (email/WhatsApp). Sets
+  `awaiting_client`, pauses the review timer, drops the case from the active
+  queue until the client responds — no ops handoff in the path.
+- **Re-engagement (Ops)** — two tabs. **Stalled intakes**: recovers
+  started-but-not-submitted intakes, sorted by how long they're stuck, with
+  recoverability, a funnel bar, a "what's blocking them" reason, preferred
+  channel, and three logged recovery actions. **Awaiting client**: read-only
+  visibility into clarifications a lawyer sent (§1B-ter) — never a work queue;
+  the only action is an optional backstop to follow up on a silent client.
 
 ---
 
@@ -136,6 +146,13 @@ at registration — they need to see what changed before they do.
   edits diffed for the client, logged timings).
 - The client final-approval consent gate (`ClientFinalApproval.tsx`) — diffs
   pre- vs post-lawyer structured data into plain language.
+- **Clarifications** (§1B-ter, `src/lib/clarification.ts` + `/api/clarification-draft`
+  + `ClarificationResponse.tsx`) — lawyer-direct, one-click mid-review
+  questions/re-uploads. LLM-drafted message (real Anthropic call, honest
+  template fallback), lawyer previews and edits before it sends. The review
+  timer pauses (`clarification_wait_seconds`, tracked separately from
+  `active_seconds`) so the 90→15 KPI never counts the client's response time
+  as lawyer work.
 - The data layer (`src/lib/store.ts`) — every transition persisted and
   timestamped; metrics derived from stored rows, never computed-and-discarded.
 
@@ -181,22 +198,27 @@ src/lib/
   portal.ts       JSON -> human-readable, copy-paste 10-step ops package
   pdf.tsx         Draft-will PDF renderer (@react-pdf/renderer)
   storage.ts      Supabase Storage uploads + signed URLs, honest local fallback
+  clarification.ts LLM-drafted clarification messages (§1B-ter) + honest fallback
   store.ts        localStorage data layer (mirrors supabase/schema.sql 1:1)
   stateMachine.ts Funnel ordering, complexity, blocking-reason, pre/post-lawyer diff
   metrics.ts      Every business metric, derived from stored rows
-  seed.ts         Demo cases + one pending-client-approval case + stalled leads
+  seed.ts         Demo cases, a pending-client-approval case, an open + an
+                   answered clarification, and stalled leads
 src/components/
   LiveWill.tsx           The signature: Schedule 1 assembling in real time
   client/ClientJourney.tsx        5-step intake
   client/ClientFinalApproval.tsx  The consent gate (§1B-bis)
-  lawyer/LawyerDesk.tsx           Review desk incl. inline "Amend draft"
+  client/ClarificationResponse.tsx The adaptive secure-link screen (§1B-ter)
+  lawyer/LawyerDesk.tsx           Review desk incl. "Amend draft" + "Ask the client"
   lawyer/PortalPackage.tsx        Human-readable package + PDF generation
-  ops/                            Re-engagement desk + metrics bar
+  ops/OpsDesk.tsx                 Two tabs: stalled intakes + read-only awaiting client
+  ops/MetricsBar.tsx              Metrics strip
 src/app/
   page.tsx           Three-surface toggle
   api/structure/     Server-side LLM call (keeps the key off the client)
   api/ocr/            Server-side Claude vision call for document OCR
   api/will-pdf/        Server-side PDF rendering
+  api/clarification-draft/ Server-side clarification message drafting
 ```
 
 ---
@@ -217,6 +239,8 @@ src/app/
 - **Scope:** DIFC **Full Will** only. ADJD / other will-types / portal-RPA are
   represented in the data model but deferred in the build — by design, not
   oversight.
+- Clarifications are lawyer-direct, one-click; ops is a read-only backstop,
+  never a required handoff — so no ops queue bottlenecks the lawyer's loop.
 - The ops package is human-readable copy-paste, never raw JSON, with clickable
   document links ready to attach.
 

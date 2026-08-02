@@ -34,6 +34,8 @@ export const STAGE_ORDER: LeadStage[] = [
 /** 0..1 progress through the intake+registration funnel. */
 export function stageProgress(stage: LeadStage): number {
   if (stage === "abandoned") return 0;
+  // A detour, not forward progress — anchor it to where it branched from.
+  if (stage === "awaiting_client") return stageProgress("in_lawyer_review");
   const i = STAGE_ORDER.indexOf(stage);
   if (i < 0) return 0;
   return i / (STAGE_ORDER.length - 1);
@@ -47,6 +49,7 @@ export const STAGE_LABELS: Record<LeadStage, string> = {
   review: "Review & submit",
   submitted: "Submitted",
   in_lawyer_review: "In lawyer review",
+  awaiting_client: "Awaiting client (clarification)",
   lawyer_approved: "Lawyer approved",
   pending_client_approval: "Awaiting client final approval",
   client_approved: "Client approved",

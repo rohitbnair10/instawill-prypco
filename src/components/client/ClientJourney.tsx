@@ -56,6 +56,7 @@ import {
   TextInput,
 } from "@/components/ui/primitives";
 import { ClientFinalApproval } from "./ClientFinalApproval";
+import { ClarificationResponse } from "./ClarificationResponse";
 
 const STEPS = ["Identity", "Your wishes", "Confirm", "Documents", "Review"] as const;
 
@@ -79,15 +80,21 @@ function identityFromDraft(draft: IntakeDraft): Identity {
 export function ClientJourney() {
   const db = useDB();
   const [approvalWillId, setApprovalWillId] = useState<string | null>(null);
+  const [respondingClarificationId, setRespondingClarificationId] = useState<string | null>(null);
   const [manualIntake, setManualIntake] = useState(false);
 
   const pendingApproval = db.wills.filter((w) => w.status === "pending_client_approval");
+  const pendingClarifications = db.clarifications.filter((c) => c.status === "sent");
 
   if (approvalWillId) {
+    return <ClientFinalApproval willId={approvalWillId} onDone={() => setApprovalWillId(null)} />;
+  }
+
+  if (respondingClarificationId) {
     return (
-      <ClientFinalApproval
-        willId={approvalWillId}
-        onDone={() => setApprovalWillId(null)}
+      <ClarificationResponse
+        clarificationId={respondingClarificationId}
+        onDone={() => setRespondingClarificationId(null)}
       />
     );
   }
@@ -96,31 +103,65 @@ export function ClientJourney() {
   // effect) — the store seeds asynchronously on first mount, so deciding this
   // once at mount time would race the seed and could permanently skip the
   // picker on a fresh page load even when a will is genuinely pending.
-  if (pendingApproval.length > 0 && !manualIntake) {
+  if ((pendingApproval.length > 0 || pendingClarifications.length > 0) && !manualIntake) {
     return (
       <div className="mx-auto max-w-xl px-5 py-10">
         <h2 className="font-serif text-2xl text-ink">Welcome back</h2>
-        <p className="mt-2 text-sm text-slate">
-          You have {pendingApproval.length} will{pendingApproval.length === 1 ? "" : "s"}{" "}
-          awaiting your final approval before it can go to registration.
-        </p>
-        <div className="mt-4 space-y-2">
-          {pendingApproval.map((w) => (
-            <Card key={w.id} className="flex items-center justify-between p-4">
-              <div>
-                <div className="font-medium text-ink">
-                  {w.structured_json?.testator.name || w.identity?.full_name}
-                </div>
-                <div className="text-xs text-slate">
-                  {w.lawyer_made_changes
-                    ? "Your lawyer made changes — review before proceeding"
-                    : "Your lawyer approved with no changes"}
-                </div>
-              </div>
-              <Button onClick={() => setApprovalWillId(w.id)}>Review &amp; approve</Button>
-            </Card>
-          ))}
-        </div>
+
+        {pendingClarifications.length > 0 && (
+          <>
+            <p className="mt-2 text-sm text-slate">
+              Your lawyer has {pendingClarifications.length} question
+              {pendingClarifications.length === 1 ? "" : "s"} before they can continue reviewing
+              your will.
+            </p>
+            <div className="mt-4 space-y-2">
+              {pendingClarifications.map((c) => {
+                const w = db.wills.find((x) => x.id === c.will_id);
+                return (
+                  <Card key={c.id} className="flex items-center justify-between border-amber/30 bg-amber/6 p-4">
+                    <div>
+                      <div className="font-medium text-ink">
+                        {w?.structured_json?.testator.name || w?.identity?.full_name}
+                      </div>
+                      <div className="text-xs text-slate">
+                        {c.mode === "document_reupload" ? "Document re-upload requested" : "A quick question"}
+                      </div>
+                    </div>
+                    <Button onClick={() => setRespondingClarificationId(c.id)}>Respond</Button>
+                  </Card>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {pendingApproval.length > 0 && (
+          <>
+            <p className="mt-6 text-sm text-slate">
+              You have {pendingApproval.length} will{pendingApproval.length === 1 ? "" : "s"}{" "}
+              awaiting your final approval before it can go to registration.
+            </p>
+            <div className="mt-4 space-y-2">
+              {pendingApproval.map((w) => (
+                <Card key={w.id} className="flex items-center justify-between p-4">
+                  <div>
+                    <div className="font-medium text-ink">
+                      {w.structured_json?.testator.name || w.identity?.full_name}
+                    </div>
+                    <div className="text-xs text-slate">
+                      {w.lawyer_made_changes
+                        ? "Your lawyer made changes — review before proceeding"
+                        : "Your lawyer approved with no changes"}
+                    </div>
+                  </div>
+                  <Button onClick={() => setApprovalWillId(w.id)}>Review &amp; approve</Button>
+                </Card>
+              ))}
+            </div>
+          </>
+        )}
+
         <Button className="mt-6" variant="secondary" onClick={() => setManualIntake(true)}>
           Start a new will instead →
         </Button>

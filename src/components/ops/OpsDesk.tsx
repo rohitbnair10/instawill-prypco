@@ -1,21 +1,28 @@
 "use client";
 
 /**
- * RE-ENGAGEMENT (OPS) — recover started-but-not-submitted intakes.
+ * RE-ENGAGEMENT (OPS) — two tabs.
  *
- * Lists stalled intakes sorted by how long they've been stuck, each with a
- * recoverability rating. On selection: a funnel progress bar, a "what's blocking
- * them" panel with the specific reason, and their preferred channel. Three
+ * Tab 1 — Stalled intakes: recover started-but-not-submitted intakes, sorted
+ * by how long they've been stuck, each with a recoverability rating. Three
  * recovery actions (reminder / assign agent / mark recovered), each logged.
+ *
+ * Tab 2 — Awaiting client (§1B-ter, read-only): cases where a LAWYER sent a
+ * clarification and is waiting on the client. Visibility only, never a work
+ * queue — the flow completes without ops touching it. The only action here is
+ * an optional backstop: proactively follow up on a silent client.
  */
 import { useMemo, useState } from "react";
 import {
+  allPendingClarifications,
   assignAgent,
   checksForWill,
   documentsForWill,
   logReminder,
+  markOpsFollowedUp,
   markRecovered,
   useDB,
+  willById,
   willsForLead,
 } from "@/lib/store";
 import {
@@ -25,7 +32,7 @@ import {
   STAGE_ORDER,
   stageProgress,
 } from "@/lib/stateMachine";
-import type { Lead, LeadStage, ReminderType } from "@/lib/types";
+import type { Clarification, Lead, LeadStage, ReminderType } from "@/lib/types";
 import { Button, Card, Pill, ProgressBar } from "@/components/ui/primitives";
 import { MetricsBar } from "./MetricsBar";
 
@@ -42,6 +49,48 @@ const INTAKE_STAGES = new Set<LeadStage>([
 const RECOVER_TONE = { high: "sage", medium: "amber", low: "clay" } as const;
 
 export function OpsDesk() {
+  const db = useDB();
+  const [tab, setTab] = useState<"stalled" | "awaiting_client">("stalled");
+  const pendingClarifications = allPendingClarifications(db);
+
+  return (
+    <div className="px-5 py-6 lg:px-8">
+      <MetricsBar />
+
+      <div className="mb-5 flex gap-1 rounded-full bg-paper-deep p-1 w-fit">
+        <button
+          onClick={() => setTab("stalled")}
+          className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
+            tab === "stalled" ? "bg-ink text-paper-parchment" : "text-slate hover:text-ink"
+          }`}
+        >
+          Stalled intakes
+        </button>
+        <button
+          onClick={() => setTab("awaiting_client")}
+          className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
+            tab === "awaiting_client" ? "bg-ink text-paper-parchment" : "text-slate hover:text-ink"
+          }`}
+        >
+          Awaiting client
+          {pendingClarifications.length > 0 && (
+            <span className="ml-1.5 rounded-full bg-amber/20 px-1.5 py-0.5 text-xs text-amber">
+              {pendingClarifications.length}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {tab === "stalled" ? <StalledIntakesTab /> : <AwaitingClientTab />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab 1 — Stalled intakes (unchanged from the original re-engagement desk)
+// ---------------------------------------------------------------------------
+
+function StalledIntakesTab() {
   const db = useDB();
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -62,59 +111,56 @@ export function OpsDesk() {
     : stalled[0]?.lead;
 
   return (
-    <div className="px-5 py-6 lg:px-8">
-      <MetricsBar />
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[340px_1fr]">
-        <aside className="rounded-xl2 bg-ink px-3 py-4 text-paper-parchment">
-          <div className="px-2">
-            <h2 className="font-serif text-xl">Stalled intakes</h2>
-            <p className="mt-1 text-xs text-paper/60">
-              Started the form, not yet submitted — longest-stuck first.
-            </p>
-          </div>
-          <div className="mt-3 space-y-2">
-            {stalled.length === 0 && (
-              <p className="px-2 text-sm text-paper/60">Queue clear 🎉</p>
-            )}
-            {stalled.map(({ lead, days }) => {
-              const isActive = lead.id === activeLead?.id;
-              return (
-                <button
-                  key={lead.id}
-                  onClick={() => setSelected(lead.id)}
-                  className={`w-full rounded-lg px-3 py-3 text-left ${
-                    isActive
-                      ? "bg-paper-parchment text-ink"
-                      : "bg-white/5 hover:bg-white/10"
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[340px_1fr]">
+      <aside className="rounded-xl2 bg-ink px-3 py-4 text-paper-parchment">
+        <div className="px-2">
+          <h2 className="font-serif text-xl">Stalled intakes</h2>
+          <p className="mt-1 text-xs text-paper/60">
+            Started the form, not yet submitted — longest-stuck first.
+          </p>
+        </div>
+        <div className="mt-3 space-y-2">
+          {stalled.length === 0 && (
+            <p className="px-2 text-sm text-paper/60">Queue clear 🎉</p>
+          )}
+          {stalled.map(({ lead, days }) => {
+            const isActive = lead.id === activeLead?.id;
+            return (
+              <button
+                key={lead.id}
+                onClick={() => setSelected(lead.id)}
+                className={`w-full rounded-lg px-3 py-3 text-left ${
+                  isActive
+                    ? "bg-paper-parchment text-ink"
+                    : "bg-white/5 hover:bg-white/10"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">{lead.full_name}</span>
+                  <Pill tone={RECOVER_TONE[lead.recoverability]}>
+                    {lead.recoverability}
+                  </Pill>
+                </div>
+                <div
+                  className={`mt-1 text-xs ${
+                    isActive ? "text-slate" : "text-paper/50"
                   }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium">{lead.full_name}</span>
-                    <Pill tone={RECOVER_TONE[lead.recoverability]}>
-                      {lead.recoverability}
-                    </Pill>
-                  </div>
-                  <div
-                    className={`mt-1 text-xs ${
-                      isActive ? "text-slate" : "text-paper/50"
-                    }`}
-                  >
-                    Stuck {days}d · {STAGE_LABELS[lead.current_stage]}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </aside>
+                  Stuck {days}d · {STAGE_LABELS[lead.current_stage]}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </aside>
 
-        <main>
-          {activeLead ? (
-            <LeadDetail key={activeLead.id} lead={activeLead} />
-          ) : (
-            <div className="text-slate">No stalled intakes to recover.</div>
-          )}
-        </main>
-      </div>
+      <main>
+        {activeLead ? (
+          <LeadDetail key={activeLead.id} lead={activeLead} />
+        ) : (
+          <div className="text-slate">No stalled intakes to recover.</div>
+        )}
+      </main>
     </div>
   );
 }
@@ -258,5 +304,81 @@ function LeadDetail({ lead }: { lead: Lead }) {
         </Card>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab 2 — Awaiting client (§1B-ter). Read-only visibility, optional backstop.
+// ---------------------------------------------------------------------------
+
+function AwaitingClientTab() {
+  const db = useDB();
+  const open = allPendingClarifications(db).sort((a, b) => (a.sent_at < b.sent_at ? -1 : 1));
+
+  return (
+    <div>
+      <div className="mb-4 rounded-xl2 border border-hairline bg-white p-4 text-sm text-slate">
+        Read-only visibility into clarifications a <strong>lawyer</strong> sent directly to a
+        client (§1B-ter) — not a work queue. The flow completes without ops: the client
+        responds via their own secure link and the case returns straight to the lawyer.
+        Following up here is an optional backstop for a silent client, never required.
+      </div>
+
+      {open.length === 0 ? (
+        <Card className="p-4 text-sm text-slate">No clarifications currently awaiting a client response.</Card>
+      ) : (
+        <div className="space-y-2">
+          {open.map((c) => (
+            <ClarificationRow key={c.id} clarification={c} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function waitingLabel(sentAt: string): string {
+  const mins = Math.round((Date.now() - new Date(sentAt).getTime()) / 60000);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
+function ClarificationRow({ clarification }: { clarification: Clarification }) {
+  const db = useDB();
+  const will = willById(db, clarification.will_id);
+  const lead = will ? db.leads.find((l) => l.id === will.lead_id) : undefined;
+
+  return (
+    <Card className="p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-ink">
+              {will?.structured_json?.testator.name || will?.identity?.full_name || lead?.full_name}
+            </span>
+            <Pill tone={clarification.mode === "document_reupload" ? "amber" : "slate"}>
+              {clarification.mode === "document_reupload" ? "document re-upload" : "question"}
+            </Pill>
+            <Pill tone="slate">via {clarification.channel}</Pill>
+          </div>
+          <p className="mt-1 text-sm text-slate">{clarification.question}</p>
+        </div>
+        <div className="text-right">
+          <div className="text-xs text-slate">Waiting</div>
+          <div className="font-serif text-lg text-ink">{waitingLabel(clarification.sent_at)}</div>
+        </div>
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        {clarification.ops_followed_up ? (
+          <Pill tone="sage">Followed up ✓</Pill>
+        ) : (
+          <Button variant="secondary" onClick={() => markOpsFollowedUp(clarification.id)}>
+            Follow up on this client (optional)
+          </Button>
+        )}
+      </div>
+    </Card>
   );
 }

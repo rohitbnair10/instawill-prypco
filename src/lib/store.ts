@@ -19,6 +19,9 @@ import type {
   Asset,
   Beneficiary,
   Check,
+  Clarification,
+  ClarificationChannel,
+  ClarificationMode,
   DocType,
   EventRow,
   Executor,
@@ -52,6 +55,7 @@ export interface DB {
   checks: Check[];
   review_sessions: ReviewSession[];
   review_items: ReviewItem[];
+  clarifications: Clarification[];
   reminders: Reminder[];
   portal_submissions: PortalSubmission[];
   users: StaffUser[];
@@ -60,7 +64,7 @@ export interface DB {
   _seeded: boolean;
 }
 
-const STORAGE_KEY = "instawill.db.v2";
+const STORAGE_KEY = "instawill.db.v3";
 
 function emptyDB(): DB {
   return {
@@ -73,6 +77,7 @@ function emptyDB(): DB {
     checks: [],
     review_sessions: [],
     review_items: [],
+    clarifications: [],
     reminders: [],
     portal_submissions: [],
     users: [],
@@ -227,6 +232,17 @@ export function activeReviewSession(d: DB, willId: string): ReviewSession | unde
 }
 export function beneficiariesForWill(d: DB, willId: string): Beneficiary[] {
   return d.beneficiaries.filter((b) => b.will_id === willId);
+}
+export function clarificationsForWill(d: DB, willId: string): Clarification[] {
+  return d.clarifications.filter((c) => c.will_id === willId);
+}
+/** The clarification currently awaiting the client's response, if any. */
+export function pendingClarificationForWill(d: DB, willId: string): Clarification | undefined {
+  return d.clarifications.find((c) => c.will_id === willId && c.status === "sent");
+}
+/** All clarifications, across every will, still awaiting a client response — for the ops read-only tab (§1C Tab 2). */
+export function allPendingClarifications(d: DB): Clarification[] {
+  return d.clarifications.filter((c) => c.status === "sent");
 }
 
 function ruleContextFor(d: DB, will: Will): RuleContext {
@@ -554,7 +570,9 @@ export function startReview(
       lawyer_id: lawyerId,
       started_at: nowISO(),
       ended_at: null,
-      duration_seconds: null,
+      active_seconds: null,
+      clarification_wait_seconds: 0,
+      paused_at: null,
       outcome: null,
       items_total: itemsTotal,
       items_cleared: 0,
@@ -589,6 +607,152 @@ export function clearReviewItem(
     check.resolved_by = lawyerId;
     session.items_cleared += 1;
     d.review_items.push({ id: uid(), review_session_id: session.id, check_id: checkId, cleared_at: ts, action });
+
+    // If this item was cleared using an answered clarification's response,
+    // mark that clarification resolved too.
+    const clarification = d.clarifications.find((c) => c.check_id === checkId && c.status === "answered");
+    if (clarification) {
+      clarification.status = "resolved";
+      clarification.resolved_at = ts;
+      d.events.push({
+        id: uid(),
+        will_id: willId,
+        lead_id: null,
+        event_type: "clarification_resolved",
+        payload: { clarification_id: clarification.id },
+        created_at: ts,
+      });
+    }
+  });
+}
+
+// ---------- clarifications (§1B-ter) ----------
+
+/**
+ * Lawyer-direct, one-click: raises a clarification on a review item instead
+ * of clearing it. Pauses the review timer (accumulating into
+ * clarification_wait_seconds, not lawyer active_seconds), sets the will to
+ * `awaiting_client` (dropping it from the active lawyer queue), and logs the
+ * send. No ops handoff in this path — ops only gets read-only visibility.
+ */
+export function raiseClarification(
+  willId: string,
+  checkId: string | null,
+  lawyerId: string,
+  mode: ClarificationMode,
+  question: string,
+  docType: DocType | null,
+  channel: ClarificationChannel,
+  messagePreview: string,
+  messageFinal: string
+): Clarification {
+  return mutate((d) => {
+    const will = d.wills.find((w) => w.id === willId);
+    const ts = nowISO();
+    const clarification: Clarification = {
+      id: uid(),
+      will_id: willId,
+      check_id: checkId,
+      raised_by: lawyerId,
+      mode,
+      question,
+      doc_type: docType,
+      message_preview: messagePreview,
+      message_final: messageFinal,
+      channel,
+      status: "sent",
+      response_text: null,
+      response_file_path: null,
+      sent_at: ts,
+      answered_at: null,
+      resolved_at: null,
+      ops_followed_up: false,
+    };
+    d.clarifications.push(clarification);
+
+    if (will) {
+      will.status = "awaiting_client";
+      will.updated_at = ts;
+      const lead = d.leads.find((l) => l.id === will.lead_id);
+      if (lead) {
+        lead.current_stage = "awaiting_client";
+        lead.stage_updated_at = ts;
+      }
+    }
+
+    const session = d.review_sessions.find((s) => s.will_id === willId && !s.ended_at);
+    if (session && !session.paused_at) {
+      session.paused_at = ts;
+      session.outcome = "raised_clarification";
+    }
+
+    d.events.push({
+      id: uid(),
+      will_id: willId,
+      lead_id: will?.lead_id ?? null,
+      event_type: "clarification_raised",
+      payload: { mode, channel, clarification_id: clarification.id },
+      created_at: ts,
+    });
+    return clarification;
+  });
+}
+
+/**
+ * Client responds via the secure link (adaptive: text reply or document
+ * re-upload). Returns the case to the lawyer at the same item — resumes the
+ * review timer (the paused interval is added to clarification_wait_seconds,
+ * not lawyer active_seconds).
+ */
+export function respondToClarification(
+  clarificationId: string,
+  response: { text?: string; filePath?: string }
+) {
+  mutate((d) => {
+    const clarification = d.clarifications.find((c) => c.id === clarificationId);
+    if (!clarification || clarification.status !== "sent") return;
+    const ts = nowISO();
+    clarification.status = "answered";
+    clarification.answered_at = ts;
+    clarification.response_text = response.text ?? null;
+    clarification.response_file_path = response.filePath ?? null;
+
+    const will = d.wills.find((w) => w.id === clarification.will_id);
+    if (will) {
+      will.status = "in_review"; // returns to the lawyer at the same item
+      will.updated_at = ts;
+      const lead = d.leads.find((l) => l.id === will.lead_id);
+      if (lead) {
+        lead.current_stage = "in_lawyer_review";
+        lead.stage_updated_at = ts;
+      }
+    }
+
+    const session = d.review_sessions.find((s) => s.will_id === clarification.will_id && !s.ended_at);
+    if (session && session.paused_at) {
+      const pausedSeconds = Math.round(
+        (new Date(ts).getTime() - new Date(session.paused_at).getTime()) / 1000
+      );
+      session.clarification_wait_seconds += Math.max(0, pausedSeconds);
+      session.paused_at = null;
+    }
+
+    d.events.push({
+      id: uid(),
+      will_id: clarification.will_id,
+      lead_id: will?.lead_id ?? null,
+      event_type: "clarification_answered",
+      payload: { clarification_id: clarification.id },
+      created_at: ts,
+    });
+  });
+}
+
+/** Optional backstop only — ops nudging a silent client. Never required. */
+export function markOpsFollowedUp(clarificationId: string) {
+  mutate((d) => {
+    const clarification = d.clarifications.find((c) => c.id === clarificationId);
+    if (clarification) clarification.ops_followed_up = true;
   });
 }
 
@@ -687,10 +851,11 @@ export function approveWill(willId: string, lawyerId: string) {
     will.updated_at = ts;
     if (session) {
       session.ended_at = ts;
-      session.duration_seconds = Math.max(
-        1,
-        Math.round((new Date(ts).getTime() - new Date(session.started_at).getTime()) / 1000)
+      const totalElapsed = Math.round(
+        (new Date(ts).getTime() - new Date(session.started_at).getTime()) / 1000
       );
+      // active_seconds excludes clarification waits — that pause is not lawyer work.
+      session.active_seconds = Math.max(1, totalElapsed - session.clarification_wait_seconds);
       session.outcome = "approved" as ReviewOutcome;
     }
     const lead = d.leads.find((l) => l.id === will.lead_id);

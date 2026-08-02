@@ -4,8 +4,9 @@
  * derivable" block in the brief.
  *
  *  - North star: registered wills / month           -> wills.registered_at
- *  - Lawyer minutes per will (90 -> 15 KPI)          -> review_sessions.duration_seconds
- *      (reported standard-case AND fleet average separately — never conflated)
+ *  - Lawyer minutes per will (90 -> 15 KPI)          -> review_sessions.active_seconds
+ *      (excludes clarification waits; reported standard-case AND fleet average
+ *      separately — never conflated)
  *  - Registration rate                               -> registered / submitted
  *  - Funnel drop-off by stage                        -> leads grouped by current_stage
  *  - Started-but-not-submitted (re-engagement queue) -> leads in identity..review
@@ -14,6 +15,9 @@
  *  - Client-approval funnel                          -> client_approved vs changes_requested after lawyer_approved_at
  *  - Lawyer-change rate                              -> lawyer_made_changes = true / lawyer-approved (proxy for LLM draft quality)
  *  - Client-approval turnaround                      -> client_approved_at - lawyer_approved_at
+ *  - Clarification rate                              -> clarifications per will (falls as structuring improves)
+ *  - Clarification turnaround                        -> answered_at - sent_at, split by mode
+ *  - Ops-followup rate                               -> ops_followed_up=true / total (low is good)
  *  - Abandoned-recovery rate                         -> reminders outcome=recovered / total
  *  - Submission error rate                           -> portal_submissions rejected / total
  *  - Turnaround time                                 -> registered_at - content_complete_at
@@ -22,7 +26,7 @@
  */
 import type { DB } from "./store";
 import { STAGE_ORDER } from "./stateMachine";
-import type { LeadStage } from "./types";
+import type { ClarificationMode, LeadStage } from "./types";
 
 export interface Metrics {
   registeredThisMonth: number;
@@ -31,10 +35,14 @@ export interface Metrics {
   registrationRate: number | null;
   startedNotSubmitted: number;
   pendingAtLawyer: number;
+  awaitingClient: number;
   pendingClientApproval: number;
   lawyerChangeRate: number | null;
   clientApprovalRate: number | null;
   avgClientApprovalTurnaroundHours: number | null;
+  clarificationRatePerWill: number | null;
+  clarificationTurnaroundMinutesByMode: Partial<Record<ClarificationMode, number>>;
+  opsFollowupRate: number | null;
   recoveryRate: number | null;
   submissionErrorRate: number | null;
   funnelByStage: Record<LeadStage, number>;
@@ -59,17 +67,19 @@ export function computeMetrics(d: DB): Metrics {
     return r.getUTCFullYear() * 12 + r.getUTCMonth() === month;
   }).length;
 
-  const completed = d.review_sessions.filter((s) => s.duration_seconds && s.outcome === "approved");
+  // Lawyer minutes use active_seconds — clarification waits are excluded,
+  // since that pause is the client's time, not lawyer work.
+  const completed = d.review_sessions.filter((s) => s.active_seconds && s.outcome === "approved");
   const standard = completed.filter((s) => s.case_complexity === "standard");
   const avg = (arr: typeof completed) =>
     arr.length
-      ? Math.round((arr.reduce((sum, s) => sum + (s.duration_seconds || 0), 0) / arr.length / 60) * 10) / 10
+      ? Math.round((arr.reduce((sum, s) => sum + (s.active_seconds || 0), 0) / arr.length / 60) * 10) / 10
       : null;
 
   const submitted = d.wills.filter((w) => w.submitted_at).length;
   const registered = d.wills.filter((w) => w.registered_at).length;
 
-  const funnelByStage = Object.fromEntries([...STAGE_ORDER, "abandoned"].map((s) => [s, 0])) as Record<
+  const funnelByStage = Object.fromEntries([...STAGE_ORDER, "awaiting_client", "abandoned"].map((s) => [s, 0])) as Record<
     LeadStage,
     number
   >;
@@ -124,6 +134,29 @@ export function computeMetrics(d: DB): Metrics {
     ? Math.round((turnaroundHours.reduce((s, h) => s + h, 0) / turnaroundHours.length) * 10) / 10
     : null;
 
+  // Clarifications (§1B-ter).
+  const clarificationRatePerWill = d.wills.length
+    ? Math.round((d.clarifications.length / d.wills.length) * 100) / 100
+    : null;
+
+  const clarificationTurnaroundMinutesByMode: Partial<Record<ClarificationMode, number>> = {};
+  (["question", "document_reupload"] as ClarificationMode[]).forEach((mode) => {
+    const answered = d.clarifications.filter((c) => c.mode === mode && c.answered_at);
+    if (answered.length) {
+      const avgMinutes =
+        answered.reduce(
+          (sum, c) => sum + (new Date(c.answered_at as string).getTime() - new Date(c.sent_at).getTime()) / 60000,
+          0
+        ) / answered.length;
+      clarificationTurnaroundMinutesByMode[mode] = Math.round(avgMinutes * 10) / 10;
+    }
+  });
+
+  // Low is good — clients respond to the direct link without needing a chase.
+  const opsFollowupRate = d.clarifications.length
+    ? Math.round((d.clarifications.filter((c) => c.ops_followed_up).length / d.clarifications.length) * 100) / 100
+    : null;
+
   return {
     registeredThisMonth,
     avgLawyerMinutesStandard: avg(standard),
@@ -131,10 +164,14 @@ export function computeMetrics(d: DB): Metrics {
     registrationRate: submitted ? Math.round((registered / submitted) * 100) / 100 : null,
     startedNotSubmitted,
     pendingAtLawyer: d.wills.filter((w) => w.status === "in_review" || w.status === "changes_requested").length,
+    awaitingClient: d.wills.filter((w) => w.status === "awaiting_client").length,
     pendingClientApproval: d.wills.filter((w) => w.status === "pending_client_approval").length,
     lawyerChangeRate,
     clientApprovalRate,
     avgClientApprovalTurnaroundHours,
+    clarificationRatePerWill,
+    clarificationTurnaroundMinutesByMode,
+    opsFollowupRate,
     recoveryRate,
     submissionErrorRate,
     funnelByStage,

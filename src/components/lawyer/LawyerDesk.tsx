@@ -31,6 +31,8 @@ import {
   lawyerSetBeneficiaryField,
   lawyerSetExecutor,
   lawyerSetGuardian,
+  clarificationsForWill,
+  raiseClarification,
 } from "@/lib/store";
 import {
   caseComplexity,
@@ -41,13 +43,17 @@ import {
 } from "@/lib/stateMachine";
 import type {
   Check,
+  Clarification,
+  ClarificationChannel,
+  ClarificationMode,
   DocType,
+  Lead,
   StructuredWill,
   Will,
   WillDocument,
 } from "@/lib/types";
 import { LiveWill } from "@/components/LiveWill";
-import { Button, Card, Pill, SeverityBadge, TextInput } from "@/components/ui/primitives";
+import { Button, Card, Pill, Select, SeverityBadge, TextInput } from "@/components/ui/primitives";
 import { PortalPackageView } from "./PortalPackage";
 
 const LAWYER_ID = "user-lawyer-1";
@@ -85,6 +91,11 @@ export function LawyerDesk() {
       })
       .sort((a, b) => b.load - a.load);
   }, [db]);
+
+  const awaitingClarification = useMemo(
+    () => db.wills.filter((w) => w.status === "awaiting_client"),
+    [db]
+  );
 
   const sentToClient = useMemo(
     () => db.wills.filter((w) => POST_LAWYER_STATUSES.includes(w.status)),
@@ -133,6 +144,31 @@ export function LawyerDesk() {
               </button>
             );
           })}
+
+          {awaitingClarification.length > 0 && (
+            <>
+              <div className="mt-5 px-2 text-xs font-semibold uppercase tracking-wide text-paper/40">
+                Awaiting client (clarification)
+              </div>
+              {awaitingClarification.map((w) => {
+                const isActive = w.id === activeWill?.id;
+                return (
+                  <button
+                    key={w.id}
+                    onClick={() => setSelected(w.id)}
+                    className={`w-full rounded-lg px-3 py-2 text-left transition-colors ${
+                      isActive ? "bg-paper-parchment text-ink" : "bg-white/5 text-paper-parchment hover:bg-white/10"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-sm">
+                      <span>{w.structured_json?.testator.name}</span>
+                      <Pill tone="amber">timer paused</Pill>
+                    </div>
+                  </button>
+                );
+              })}
+            </>
+          )}
 
           {sentToClient.length > 0 && (
             <>
@@ -183,11 +219,13 @@ function CaseReview({ will }: { will: Will }) {
   const checks = checksForWill(db, will.id);
   const docs = documentsForWill(db, will.id);
   const lead = leadById(db, will.lead_id);
+  const clarifications = clarificationsForWill(db, will.id);
   const structured = will.structured_json;
 
   if (!structured) return <div className="text-slate">No structured content yet.</div>;
 
   const isActive = ACTIVE_STATUSES.includes(will.status);
+  const isAwaitingClarification = will.status === "awaiting_client";
   const cleared = clearedAtIntake(checks);
   const infos = infoChecks(checks);
   const openChecks = openReviewItems(checks);
@@ -232,7 +270,9 @@ function CaseReview({ will }: { will: Will }) {
               <div>
                 Ball with:{" "}
                 <span className="font-semibold text-ink">
-                  {!isActive
+                  {isAwaitingClarification
+                    ? "Client (clarification)"
+                    : !isActive
                     ? will.status === "registered"
                       ? "Registry"
                       : "Client"
@@ -242,13 +282,13 @@ function CaseReview({ will }: { will: Will }) {
                 </span>
               </div>
               {isActive && session?.started_at && <div>Review timer running (measures the 90→15 KPI)</div>}
+              {isAwaitingClarification && <div>Review timer paused — clarification sent</div>}
             </div>
           </div>
         </Card>
 
-        {!isActive && (
-          <CaseStatusBanner will={will} />
-        )}
+        {isAwaitingClarification && <AwaitingClarificationBanner clarifications={clarifications} />}
+        {!isActive && !isAwaitingClarification && <CaseStatusBanner will={will} />}
 
         {cleared.length > 0 && (
           <Card className="border-sage/30 bg-sage/6 p-4">
@@ -269,37 +309,45 @@ function CaseReview({ will }: { will: Will }) {
 
         {isActive && <AmendDraftPanel willId={will.id} structured={structured} />}
 
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-sm font-semibold uppercase tracking-wide text-slate">Judgment items — cleared in order</h3>
-            <span className="text-xs text-slate">
-              {items.filter((i) => i.cleared).length}/{items.length} cleared
-            </span>
+        {!isAwaitingClarification && (
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate">Judgment items — cleared in order</h3>
+              <span className="text-xs text-slate">
+                {items.filter((i) => i.cleared).length}/{items.length} cleared
+              </span>
+            </div>
+
+            {items.length === 0 && (
+              <Card className="p-4 text-sm text-slate">No judgment items — a clean standard case. Ready to approve.</Card>
+            )}
+
+            <div className="space-y-2">
+              {items.map((item, i) => {
+                const locked = isActive && !item.cleared && i !== activeIndex;
+                const linkedClarification =
+                  item.kind === "check"
+                    ? clarifications.find((c) => c.check_id === item.check.id && c.status === "answered")
+                    : undefined;
+                return (
+                  <ReviewItemRow
+                    key={item.id}
+                    item={item}
+                    locked={locked}
+                    willId={will.id}
+                    leadId={will.lead_id}
+                    lead={lead}
+                    structured={structured}
+                    answeredClarification={linkedClarification}
+                    onClearCheck={(action) => clearReviewItem(will.id, item.id, LAWYER_ID, action)}
+                  />
+                );
+              })}
+            </div>
           </div>
+        )}
 
-          {items.length === 0 && (
-            <Card className="p-4 text-sm text-slate">No judgment items — a clean standard case. Ready to approve.</Card>
-          )}
-
-          <div className="space-y-2">
-            {items.map((item, i) => {
-              const locked = isActive && !item.cleared && i !== activeIndex;
-              return (
-                <ReviewItemRow
-                  key={item.id}
-                  item={item}
-                  locked={locked}
-                  willId={will.id}
-                  leadId={will.lead_id}
-                  structured={structured}
-                  onClearCheck={(action) => clearReviewItem(will.id, item.id, LAWYER_ID, action)}
-                />
-              );
-            })}
-          </div>
-        </div>
-
-        {isActive ? (
+        {isAwaitingClarification ? null : isActive ? (
           <div className="flex items-center justify-between rounded-xl2 border border-hairline bg-white p-4">
             <div className="text-sm text-slate">
               {allCleared ? "All items cleared. You can approve." : `Clear ${remaining} more to approve.`}
@@ -350,6 +398,28 @@ function CaseStatusBanner({ will }: { will: Will }) {
   return (
     <Card className={`p-4 ${label.tone === "sage" ? "border-sage/30 bg-sage/6" : "border-amber/30 bg-amber/6"}`}>
       <p className={`text-sm ${label.tone === "sage" ? "text-sage" : "text-amber"}`}>{label.text}</p>
+    </Card>
+  );
+}
+
+/**
+ * Shown while a case is `awaiting_client` (§1B-ter). Lawyer-direct, no ops
+ * handoff — this just reflects the sent clarification and reminds the lawyer
+ * the case drops out of the active queue until the client responds.
+ */
+function AwaitingClarificationBanner({ clarifications }: { clarifications: Clarification[] }) {
+  const open = clarifications.find((c) => c.status === "sent");
+  if (!open) return null;
+  return (
+    <Card className="border-amber/30 bg-amber/6 p-4">
+      <div className="text-sm font-semibold text-amber">
+        Awaiting client response — {open.mode === "document_reupload" ? "document re-upload requested" : "question sent"}
+      </div>
+      <p className="mt-1 text-sm text-ink">{open.message_final}</p>
+      <p className="mt-2 text-xs text-slate">
+        Sent via {open.channel} · This case is off your active queue until they respond, then it
+        returns here at the same item.
+      </p>
     </Card>
   );
 }
@@ -472,16 +542,22 @@ function ReviewItemRow({
   locked,
   willId,
   leadId,
+  lead,
   structured,
+  answeredClarification,
   onClearCheck,
 }: {
   item: Item;
   locked: boolean;
   willId: string;
   leadId: string;
+  lead: Lead | undefined;
   structured: StructuredWill;
+  answeredClarification?: Clarification;
   onClearCheck: (action: "confirmed" | "verified") => void;
 }) {
+  const [clarifyOpen, setClarifyOpen] = useState(false);
+
   if (item.kind === "check") {
     const c = item.check;
     const isAI = c.check_key === "ai_distribution";
@@ -498,22 +574,50 @@ function ReviewItemRow({
             <div>
               <div className="text-sm font-medium text-ink">{labelForCheck(c.check_key)}</div>
               <p className="mt-0.5 text-sm text-slate">{c.detail}</p>
+              {answeredClarification && (
+                <div className="mt-2 rounded-lg bg-sage/8 px-3 py-2 text-sm">
+                  <span className="font-semibold text-sage">Client responded: </span>
+                  <span className="text-ink">
+                    {answeredClarification.response_text ||
+                      (answeredClarification.response_file_path ? "Document re-uploaded." : "(no text response)")}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
           {item.cleared ? (
             <span className="whitespace-nowrap text-xs font-semibold text-sage">Cleared ✓</span>
           ) : locked ? (
             <span className="whitespace-nowrap text-xs text-slate">🔒 Locked</span>
-          ) : isMinorTrust && minorBeneficiary ? (
-            <Button variant="secondary" onClick={() => lawyerSetBeneficiaryTrust(willId, minorBeneficiary.name, true)}>
-              Hold in trust &amp; clear
-            </Button>
           ) : (
-            <Button variant="secondary" onClick={() => onClearCheck(isAI ? "verified" : "confirmed")}>
-              {isAI ? "Verify & mark reviewed" : "Confirm & clear"}
-            </Button>
+            <div className="flex flex-col items-end gap-2">
+              {isMinorTrust && minorBeneficiary ? (
+                <Button variant="secondary" onClick={() => lawyerSetBeneficiaryTrust(willId, minorBeneficiary.name, true)}>
+                  Hold in trust &amp; clear
+                </Button>
+              ) : (
+                <Button variant="secondary" onClick={() => onClearCheck(isAI ? "verified" : "confirmed")}>
+                  {isAI ? "Verify & mark reviewed" : "Confirm & clear"}
+                </Button>
+              )}
+              {!answeredClarification && (
+                <button className="text-xs text-slate underline" onClick={() => setClarifyOpen((o) => !o)}>
+                  {clarifyOpen ? "Cancel" : "Ask the client"}
+                </button>
+              )}
+            </div>
           )}
         </div>
+        {clarifyOpen && !item.cleared && !locked && (
+          <ClarifyPanel
+            willId={willId}
+            checkId={c.id}
+            checkKey={c.check_key}
+            checkDetail={c.detail}
+            lead={lead}
+            onSent={() => setClarifyOpen(false)}
+          />
+        )}
       </Card>
     );
   }
@@ -545,6 +649,150 @@ function ReviewItemRow({
         )}
       </div>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Ask the client (§1B-ter) — lawyer-direct, one click, LLM-drafted preview.
+// ---------------------------------------------------------------------------
+
+const REUPLOAD_DOC_BY_CHECK: Partial<Record<Check["check_key"], DocType>> = {
+  name_mismatch: "passport",
+  deed_joint_owner: "title_deed",
+};
+
+function ClarifyPanel({
+  willId,
+  checkId,
+  checkKey,
+  checkDetail,
+  lead,
+  onSent,
+}: {
+  willId: string;
+  checkId: string;
+  checkKey: Check["check_key"];
+  checkDetail: string;
+  lead: Lead | undefined;
+  onSent: () => void;
+}) {
+  const [mode, setMode] = useState<ClarificationMode>(
+    REUPLOAD_DOC_BY_CHECK[checkKey] ? "document_reupload" : "question"
+  );
+  const [docType, setDocType] = useState<DocType>(REUPLOAD_DOC_BY_CHECK[checkKey] ?? "passport");
+  const [question, setQuestion] = useState(`Can you confirm: ${checkDetail}`);
+  const [channel, setChannel] = useState<ClarificationChannel>(
+    lead?.preferred_channel === "whatsapp" ? "whatsapp" : "email"
+  );
+  const [drafting, setDrafting] = useState(false);
+  const [messageFinal, setMessageFinal] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+
+  const draftMessage = async () => {
+    setDrafting(true);
+    try {
+      const res = await fetch("/api/clarification-draft", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          clientName: lead?.full_name || "there",
+          mode,
+          question,
+          docType: mode === "document_reupload" ? docType : undefined,
+        }),
+      });
+      const data = (await res.json()) as { text: string };
+      setMessageFinal(data.text);
+    } catch {
+      setMessageFinal(`Hi — quick one from your InstaWill lawyer: ${question}`);
+    } finally {
+      setDrafting(false);
+    }
+  };
+
+  const send = () => {
+    if (!messageFinal || !lead) return;
+    setSending(true);
+    raiseClarification(
+      willId,
+      checkId,
+      LAWYER_ID,
+      mode,
+      question,
+      mode === "document_reupload" ? docType : null,
+      channel,
+      messageFinal,
+      messageFinal
+    );
+    onSent();
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-hairline bg-paper-deep/30 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant={mode === "question" ? "sage" : "secondary"}
+          onClick={() => {
+            setMode("question");
+            setMessageFinal(null);
+          }}
+        >
+          Ask a question
+        </Button>
+        <Button
+          variant={mode === "document_reupload" ? "sage" : "secondary"}
+          onClick={() => {
+            setMode("document_reupload");
+            setMessageFinal(null);
+          }}
+        >
+          Request document re-upload
+        </Button>
+        <Select value={channel} onChange={(e) => setChannel(e.target.value as ClarificationChannel)} className="ml-auto max-w-[140px]">
+          <option value="email">Email</option>
+          <option value="whatsapp">WhatsApp</option>
+        </Select>
+      </div>
+
+      {mode === "document_reupload" && (
+        <Select className="mt-2" value={docType} onChange={(e) => setDocType(e.target.value as DocType)}>
+          <option value="passport">Passport</option>
+          <option value="emirates_id">Emirates ID</option>
+          <option value="title_deed">Title deed</option>
+        </Select>
+      )}
+
+      <textarea
+        className="mt-2 w-full rounded-lg border border-hairline bg-white px-3 py-2 text-sm text-ink outline-none focus:border-slate focus:ring-2 focus:ring-slate/20"
+        rows={2}
+        value={question}
+        onChange={(e) => {
+          setQuestion(e.target.value);
+          setMessageFinal(null);
+        }}
+      />
+
+      {messageFinal === null ? (
+        <Button className="mt-2" variant="secondary" disabled={drafting || !question.trim()} onClick={draftMessage}>
+          {drafting ? "Drafting…" : "Draft message"}
+        </Button>
+      ) : (
+        <>
+          <div className="mt-2 text-xs font-medium text-slate">
+            Message preview — LLM-drafted, edit before sending:
+          </div>
+          <textarea
+            className="mt-1 w-full rounded-lg border border-hairline bg-white px-3 py-2 text-sm text-ink outline-none focus:border-slate focus:ring-2 focus:ring-slate/20"
+            rows={4}
+            value={messageFinal}
+            onChange={(e) => setMessageFinal(e.target.value)}
+          />
+          <Button className="mt-2" variant="sage" disabled={sending || !lead} onClick={send}>
+            Send to client ({channel})
+          </Button>
+        </>
+      )}
+    </div>
   );
 }
 

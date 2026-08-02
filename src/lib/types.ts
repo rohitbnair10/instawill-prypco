@@ -24,6 +24,12 @@ export type ResidencyStatus = "resident" | "non_resident" | "unknown";
  * -> in_lawyer_review -> lawyer_approved -> pending_client_approval ->
  * client_approved -> portal_ready -> registered (or abandoned at any point
  * before submission).
+ *
+ * `awaiting_client` is a detour, not forward progress: the lawyer raised a
+ * clarification (§1B-ter) mid-review and the case is paused on the client's
+ * response. It always returns to `in_lawyer_review` once answered — it is
+ * NOT the same as `changes_requested` (a targeted one-item question/re-upload
+ * vs. a heavier "redo part of intake").
  */
 export type LeadStage =
   | "identity"
@@ -33,6 +39,7 @@ export type LeadStage =
   | "review"
   | "submitted"
   | "in_lawyer_review"
+  | "awaiting_client"
   | "lawyer_approved"
   | "pending_client_approval"
   | "client_approved"
@@ -58,6 +65,7 @@ export type WillStatus =
   | "documents_pending"
   | "submitted"
   | "in_review"
+  | "awaiting_client"
   | "changes_requested"
   | "lawyer_approved"
   | "pending_client_approval"
@@ -113,7 +121,11 @@ export type CheckKey =
 
 export type UserRole = "lawyer" | "ops_agent" | "admin";
 
-export type ReviewOutcome = "approved" | "changes_requested" | "escalated";
+export type ReviewOutcome =
+  | "approved"
+  | "changes_requested"
+  | "escalated"
+  | "raised_clarification";
 
 export type CaseComplexity = "standard" | "complex";
 
@@ -126,6 +138,12 @@ export type ReviewItemAction =
 export type ReminderType = "automated_email" | "automated_whatsapp" | "agent_call";
 
 export type ReminderOutcome = "sent" | "no_response" | "recovered" | "opted_out";
+
+// ---------- clarifications (§1B-ter) ----------
+
+export type ClarificationMode = "question" | "document_reupload";
+export type ClarificationChannel = "email" | "whatsapp";
+export type ClarificationStatus = "sent" | "answered" | "resolved";
 
 export type PortalMethod = "manual_ops" | "rpa_v2";
 
@@ -243,11 +261,43 @@ export interface ReviewSession {
   lawyer_id: string;
   started_at: string;
   ended_at?: string | null;
-  duration_seconds?: number | null;
+  /** HEADLINE METRIC — excludes clarification waits. Finalised at session end. */
+  active_seconds?: number | null;
+  /** Paused time (clarification waits), accumulated and reported separately — not lawyer work. */
+  clarification_wait_seconds: number;
+  /** Internal bookkeeping: when the CURRENT pause started, if any (§1B-ter). Not a public metric. */
+  paused_at?: string | null;
   outcome?: ReviewOutcome | null;
   items_total: number;
   items_cleared: number;
   case_complexity: CaseComplexity;
+}
+
+/**
+ * A lawyer-raised, one-item clarification mid-review (§1B-ter). Lawyer-direct:
+ * sent straight to the client (email/WhatsApp), no ops handoff in the path.
+ * Ops gets read-only visibility (§1C Tab 2) and an optional follow-up
+ * backstop — the flow completes without them.
+ */
+export interface Clarification {
+  id: string;
+  will_id: string;
+  check_id: string | null;
+  raised_by: string; // fk users (lawyer)
+  mode: ClarificationMode;
+  question: string;
+  doc_type: DocType | null; // set only when mode = document_reupload
+  message_preview: string; // LLM-drafted
+  message_final: string; // after lawyer edit
+  channel: ClarificationChannel;
+  status: ClarificationStatus;
+  response_text: string | null;
+  response_file_path: string | null;
+  sent_at: string;
+  answered_at: string | null;
+  resolved_at: string | null;
+  /** Optional backstop only — never required for the flow to complete. */
+  ops_followed_up: boolean;
 }
 
 export interface ReviewItem {
