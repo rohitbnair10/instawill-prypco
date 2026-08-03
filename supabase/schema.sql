@@ -399,8 +399,20 @@ begin
         set cancelled_at = now()
         where will_id = new.id
           and sent_at is null
-          and cancelled_at is null;
+          and cancelled_at is null
+          and sequence_step <> 'confirmation';  -- don't cancel the one we're about to queue
       new.active_notification_state := null;
+
+      -- Loop closure: when the client has genuinely finished (moved to a
+      -- NON-pending state), queue a confirmation notification, due now. The
+      -- polling scanner sends it — so there is no webhook to configure and the
+      -- "thank you, we've got it" email is part of the same one event stream.
+      if not new_pending then
+        insert into notifications
+          (will_id, lead_id, trigger_state, channel, source, sequence_step, template_key, scheduled_for)
+        values (new.id, new.lead_id, old.status::text::notification_trigger_state,
+                'email', 'system', 'confirmation', 'confirm_' || old.status::text, now());
+      end if;
     end if;
 
     -- Entered a (new) client-pending state → arm a fresh cadence.
