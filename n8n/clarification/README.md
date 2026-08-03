@@ -41,14 +41,20 @@ itself, so in practice each clarification goes out exactly once.
 
 ## Test
 
-Needs one existing row in `users` (for `raised_by`). Uses Resend's test sink so
-it sends on the free tier:
+Creates a staff user if none exists (`raised_by` is NOT NULL — without this the
+whole block silently rolls back). Uses Resend's test sink so it sends on the free
+tier:
 
 ```sql
 do $$
 declare v_lead uuid; v_will uuid; v_user uuid;
 begin
   select id into v_user from users limit 1;
+  if v_user is null then
+    insert into users (name, role, email)
+      values ('Test Lawyer', 'lawyer', 'lawyer@instawill.ae')
+      returning id into v_user;
+  end if;
   insert into leads (email, full_name, current_stage)
     values ('delivered@resend.dev', 'Test Client', 'review')
     returning id into v_lead;
