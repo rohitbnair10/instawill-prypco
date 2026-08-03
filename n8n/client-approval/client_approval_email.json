@@ -1,0 +1,62 @@
+{
+  "name": "InstaWill · Client approval-request email",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 1 }] } },
+      "id": "d1000000-0000-4000-8000-000000000001",
+      "name": "Every 1 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select\n  w.id         as will_id,\n  l.full_name  as full_name,\n  l.email      as email\nfrom wills w\njoin leads l on l.id = w.lead_id\nwhere w.status = 'pending_client_approval'\n  and w.approval_notified_at is null\norder by w.lawyer_approved_at\nlimit 50;",
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000002",
+      "name": "Select pending approvals",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [460, 300],
+      "notes": "SELECT returns one item per will owed this email (n8n reliably emits SELECT rows as items — an UPDATE...RETURNING does not). 0 rows -> run ends, no email. Keep 'Always Output Data' OFF (Settings tab)."
+    },
+    {
+      "parameters": {
+        "fromEmail": "wills@instawill.ae",
+        "toEmail": "={{ $json.email }}",
+        "subject": "=Your will is ready to review, {{ $json.full_name.split(' ')[0] }}",
+        "emailFormat": "html",
+        "html": "=<p>Hi {{ $json.full_name.split(' ')[0] }},</p><p>Good news — your lawyer has reviewed and approved your will. It's ready for your final look.</p><p><a href=\"https://instawill-prypco.vercel.app\">Review and approve your will →</a></p><p>Thank you,<br>The InstaWill team</p>",
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000003",
+      "name": "Send approval-request email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [720, 300],
+      "notes": "Static demo link (https://instawill-prypco.vercel.app) — swap for a real per-will/signed link before going live. Swap the SMTP node for Resend/SendGrid if you prefer."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update wills set approval_notified_at = now() where id = '{{ $('Select pending approvals').item.json.will_id }}' and approval_notified_at is null;",
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000004",
+      "name": "Mark notified",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [980, 300],
+      "notes": "Runs only after the email sends (send-then-mark), so an SMTP failure leaves the row un-notified and it retries next minute."
+    }
+  ],
+  "connections": {
+    "Every 1 min": { "main": [[{ "node": "Select pending approvals", "type": "main", "index": 0 }]] },
+    "Select pending approvals": { "main": [[{ "node": "Send approval-request email", "type": "main", "index": 0 }]] },
+    "Send approval-request email": { "main": [[{ "node": "Mark notified", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

@@ -11,6 +11,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdminClient, SUPABASE_ADMIN_CONFIGURED } from "@/lib/supabaseAdmin";
+import { findOrCreateLead, findOrCreateWill, findOrCreateStaffUser } from "@/lib/supabaseSync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,86 +47,12 @@ export async function POST(req: NextRequest) {
   if (!db) return NextResponse.json({ ok: true, skipped: "supabase not configured" });
 
   try {
-    // 1) Find or create the lead by email.
-    const { data: existingLead } = await db
-      .from("leads")
-      .select("id")
-      .eq("email", body.leadEmail)
-      .maybeSingle();
+    const leadId = await findOrCreateLead(db, body, "awaiting_client");
+    const willId = await findOrCreateWill(db, leadId, "awaiting_client");
+    const lawyerId = await findOrCreateStaffUser(db, "lawyer", "Demo Lawyer", "lawyer@instawill.ae");
 
-    let leadId: string;
-    if (existingLead) {
-      leadId = existingLead.id;
-      await db
-        .from("leads")
-        .update({
-          current_stage: "awaiting_client",
-          stage_updated_at: new Date().toISOString(),
-        })
-        .eq("id", leadId);
-    } else {
-      const { data: newLead, error } = await db
-        .from("leads")
-        .insert({
-          full_name: body.leadName || "Client",
-          email: body.leadEmail,
-          phone: body.leadPhone || null,
-          preferred_channel: body.preferredChannel || "email",
-          current_stage: "awaiting_client",
-        })
-        .select("id")
-        .single();
-      if (error || !newLead) throw error || new Error("lead insert failed");
-      leadId = newLead.id;
-    }
-
-    // 2) Find or create a will for that lead.
-    const { data: existingWill } = await db
-      .from("wills")
-      .select("id")
-      .eq("lead_id", leadId)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    let willId: string;
-    if (existingWill) {
-      willId = existingWill.id;
-      await db.from("wills").update({ status: "awaiting_client" }).eq("id", willId);
-    } else {
-      const { data: newWill, error } = await db
-        .from("wills")
-        .insert({ lead_id: leadId, status: "awaiting_client" })
-        .select("id")
-        .single();
-      if (error || !newWill) throw error || new Error("will insert failed");
-      willId = newWill.id;
-    }
-
-    // 3) Resolve a staff user for raised_by (clarifications.raised_by is NOT
-    //    NULL). No real auth/session yet, so reuse or seed one demo lawyer.
-    const { data: existingLawyer } = await db
-      .from("users")
-      .select("id")
-      .eq("role", "lawyer")
-      .limit(1)
-      .maybeSingle();
-
-    let lawyerId: string;
-    if (existingLawyer) {
-      lawyerId = existingLawyer.id;
-    } else {
-      const { data: newLawyer, error } = await db
-        .from("users")
-        .insert({ name: "Demo Lawyer", role: "lawyer", email: "lawyer@instawill.ae" })
-        .select("id")
-        .single();
-      if (error || !newLawyer) throw error || new Error("lawyer user insert failed");
-      lawyerId = newLawyer.id;
-    }
-
-    // 4) Insert the clarification — status 'sent' is exactly what the n8n
-    //    poller (n8n/clarification/clarification_email.json) looks for.
+    // Insert the clarification — status 'sent' is exactly what the n8n
+    // poller (n8n/clarification/clarification_email.json) looks for.
     const { data: clarification, error: clarErr } = await db
       .from("clarifications")
       .insert({

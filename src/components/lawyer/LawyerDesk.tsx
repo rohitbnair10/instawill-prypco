@@ -361,7 +361,28 @@ function CaseReview({ will }: { will: Will }) {
             <div className="text-sm text-slate">
               {allCleared ? "All items cleared. You can approve." : `Clear ${remaining} more to approve.`}
             </div>
-            <Button variant="sage" disabled={!allCleared} onClick={() => approveWill(will.id, LAWYER_ID)}>
+            <Button
+              variant="sage"
+              disabled={!allCleared}
+              onClick={() => {
+                approveWill(will.id, LAWYER_ID);
+                if (lead) {
+                  // Mirror into Postgres so the n8n approval-request workflow
+                  // can email the client. Fire-and-forget — a Supabase hiccup
+                  // must never block the local demo flow (already moved on above).
+                  fetch("/api/approval-requests", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({
+                      leadName: lead.full_name,
+                      leadEmail: lead.email,
+                      leadPhone: lead.phone,
+                      preferredChannel: lead.preferred_channel,
+                    }),
+                  }).catch((err) => console.error("approval-request mirror failed:", err));
+                }
+              }}
+            >
               Approve draft → send to client
             </Button>
           </div>

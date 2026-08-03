@@ -140,6 +140,10 @@ create table wills (
   content_complete_at timestamptz,
   submitted_at timestamptz,
   lawyer_approved_at timestamptz,
+  -- Send-once marker for the client-approval-request email (n8n/client-approval/):
+  -- null while an email is owed, stamped once it's sent. Reset to null on every
+  -- re-approval so a later re-send (after changes) emails the client again.
+  approval_notified_at timestamptz,
   client_approved_at timestamptz,
   portal_ready_at timestamptz,
   registered_at timestamptz
