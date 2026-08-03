@@ -34,10 +34,13 @@ itself, so in practice each clarification goes out exactly once.
    host `aws-0-<region>.pooler.supabase.com`, port `5432`, db `postgres`,
    user `postgres.<project-ref>`, your DB password, SSL **require**.
 3. **Email credential** (SMTP / Resend / SendGrid). Set a real `fromEmail`.
-4. **Variable:** Settings → Variables → `APP_URL = https://instawill-prypco.vercel.app`
-   (used for the reply link; falls back to that default if unset).
-5. Import `clarification_email.json`, assign both credentials on the red nodes,
+4. Import `clarification_email.json`, assign both credentials on the red nodes,
    toggle **Active**.
+
+The reply link is a **static URL** (`https://instawill-prypco.vercel.app`) hardcoded
+in the email HTML — fine for a demo. For production, replace it with a signed or
+tokenized per-will link (see "Production hardening" below) rather than exposing a
+raw id or sending everyone to the same landing page.
 
 ## Test
 
@@ -89,4 +92,6 @@ store → Supabase port (Stage 2). Until then, the SQL above is how you exercise
 
 - Switch the Postgres node to **Query Parameters** rather than the inline query
   if you ever templatize it with user input (this query takes none, so it's already safe).
-- Sign or tokenize the portal link instead of exposing the raw `will_id`.
+- Swap the static demo link for a real per-will portal link, signed or tokenized
+  (e.g. `{APP_URL}/portal/{will_id}?n={clarification_id}`) rather than a flat
+  homepage URL or a raw exposed `will_id`.
