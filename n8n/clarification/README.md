@@ -12,12 +12,19 @@ a minute, sends that question to the client, and stamps `notified_at` so it neve
 sends twice.
 
 ```
-Schedule (1 min)  →  Postgres: claim unsent clarifications  →  Send email
+Schedule (1 min)  →  SELECT pending  →  Send email  →  Mark notified
 ```
 
-The claim is a single `UPDATE … RETURNING`: it stamps `notified_at` **and**
-returns the row in one atomic statement, so even overlapping runs can't
-double-send. No `notifications` table, no DB trigger, no webhook.
+`SELECT` returns one item per pending clarification (n8n reliably emits SELECT
+rows as items — an `UPDATE … RETURNING` does **not**, it just reports
+`{success:true}`, which is why this is a SELECT and not a one-shot claim). After
+the email sends, `Mark notified` stamps `notified_at`, so the next poll skips it.
+No `notifications` table, no DB trigger, no webhook.
+
+**Send-then-mark** is deliberate: if SMTP fails, the row stays un-notified and
+retries next minute (delivery matters more here than a vanishingly rare
+double-send). At a 1-minute cadence with sub-second runs the poll never overlaps
+itself, so in practice each clarification goes out exactly once.
 
 ## Setup
 

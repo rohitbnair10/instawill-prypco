@@ -12,15 +12,15 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "update clarifications c\nset notified_at = now()\nfrom wills w\njoin leads l on l.id = w.lead_id\nwhere c.will_id = w.id\n  and c.status = 'sent'\n  and c.notified_at is null\nreturning\n  c.id            as clarification_id,\n  c.will_id       as will_id,\n  c.message_final as message_final,\n  l.full_name     as full_name,\n  l.email         as email;",
+        "query": "select\n  c.id            as clarification_id,\n  c.will_id       as will_id,\n  c.message_final as message_final,\n  l.full_name     as full_name,\n  l.email         as email\nfrom clarifications c\njoin wills w on w.id = c.will_id\njoin leads l on l.id = w.lead_id\nwhere c.status = 'sent'\n  and c.notified_at is null\norder by c.sent_at\nlimit 50;",
         "options": {}
       },
       "id": "c1000000-0000-4000-8000-000000000002",
-      "name": "Claim unsent clarifications",
+      "name": "Select pending clarifications",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.4,
-      "position": [480, 300],
-      "notes": "UPDATE ... RETURNING is atomic: it stamps notified_at AND returns the row in one shot, so overlapping runs can never email the same clarification twice. Emits one item per clarification -> the email node runs once each. If nothing is owed, 0 rows and the workflow ends."
+      "position": [460, 300],
+      "notes": "SELECT returns one item per pending clarification (email, name, message, will_id). 0 rows -> run ends, no email. Keep 'Always Output Data' OFF (Settings tab) so an empty poll doesn't push a blank item downstream."
     },
     {
       "parameters": {
@@ -35,13 +35,27 @@
       "name": "Send clarification email",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
-      "position": [740, 300],
-      "notes": "message_final is the lawyer-approved, LLM-drafted question — send it verbatim. Set APP_URL in n8n Settings -> Variables. Swap the SMTP node for Resend/SendGrid if you prefer."
+      "position": [720, 300],
+      "notes": "message_final is the lawyer-approved, LLM-drafted question — sent verbatim. Set APP_URL in n8n Settings -> Variables. Swap the SMTP node for Resend/SendGrid if you prefer."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update clarifications set notified_at = now() where id = '{{ $('Select pending clarifications').item.json.clarification_id }}' and notified_at is null;",
+        "options": {}
+      },
+      "id": "c1000000-0000-4000-8000-000000000004",
+      "name": "Mark notified",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [980, 300],
+      "notes": "Runs only after the email sends (send-then-mark), so an SMTP failure leaves the row un-notified and it retries next minute. Uses the paired SELECT item for the id, since the email node doesn't pass the row through."
     }
   ],
   "connections": {
-    "Every 1 min": { "main": [[{ "node": "Claim unsent clarifications", "type": "main", "index": 0 }]] },
-    "Claim unsent clarifications": { "main": [[{ "node": "Send clarification email", "type": "main", "index": 0 }]] }
+    "Every 1 min": { "main": [[{ "node": "Select pending clarifications", "type": "main", "index": 0 }]] },
+    "Select pending clarifications": { "main": [[{ "node": "Send clarification email", "type": "main", "index": 0 }]] },
+    "Send clarification email": { "main": [[{ "node": "Mark notified", "type": "main", "index": 0 }]] }
   },
   "settings": { "executionOrder": "v1" },
   "active": false
