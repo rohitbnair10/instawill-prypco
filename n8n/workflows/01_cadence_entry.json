@@ -25,7 +25,7 @@
       "parameters": {
         "assignments": {
           "assignments": [
-            { "id": "f1", "name": "portal_link", "value": "={{ ($env.APP_URL || 'https://app.instawill.ae') + '/portal/' + $json.will_id }}", "type": "string" },
+            { "id": "f1", "name": "portal_link", "value": "={{ ($vars.APP_URL || 'https://app.instawill.ae') + '/portal/' + $json.will_id }}", "type": "string" },
             { "id": "f2", "name": "blocking_reason", "value": "={{ $json.blocking_reason || 'the last step on your will' }}", "type": "string" }
           ]
         },
