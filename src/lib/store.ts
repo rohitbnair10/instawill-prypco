@@ -318,6 +318,8 @@ export function createIntake(seed: {
     const draft: IntakeDraft = {
       lead_id: lead.id,
       will_id: will.id,
+      email: seed.email || "",
+      phone: seed.phone || "",
       passport: {
         uploaded: false,
         ocr: null,

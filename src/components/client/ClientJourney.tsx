@@ -64,6 +64,10 @@ const STEPS = ["Identity", "Your wishes", "Confirm", "Documents", "Review"] as c
 
 const STAGE_FOR_STEP: LeadStage[] = ["identity", "wishes", "confirm", "documents", "review"];
 
+// Deliberately permissive — this only gates step 0, real validation happens
+// server-side wherever the email is actually used (send, portal auth, etc).
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /**
  * There's no real login in this prototype, so we track "who this browser is"
  * locally — mirroring how the production RLS policies in supabase/schema.sql
@@ -351,7 +355,12 @@ function IntakeWizard() {
   const goto = (n: number) => {
     setStep(n);
     setLeadStage(ids.leadId, STAGE_FOR_STEP[n]);
-    updateLead(ids.leadId, { full_name: identity.full_name, residency_status: identity.residency_status });
+    updateLead(ids.leadId, {
+      full_name: identity.full_name,
+      residency_status: identity.residency_status,
+      email: draft.email,
+      phone: draft.phone,
+    });
   };
 
   return (
@@ -548,6 +557,32 @@ function IdentityStep({
 
   return (
     <div className="space-y-5">
+      <Card className="p-5">
+        <div className="font-medium text-ink">Your contact details</div>
+        <p className="mt-1 text-xs text-slate">
+          We&apos;ll email you a secure link whenever we need something from you, and to
+          confirm each step of your will.
+        </p>
+        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Labeled label="Email">
+            <TextInput
+              type="email"
+              value={draft.email}
+              onChange={(e) => update({ email: e.target.value })}
+              placeholder="you@example.com"
+            />
+          </Labeled>
+          <Labeled label="Phone (optional)">
+            <TextInput
+              type="tel"
+              value={draft.phone}
+              onChange={(e) => update({ phone: e.target.value })}
+              placeholder="+971 5..."
+            />
+          </Labeled>
+        </div>
+      </Card>
+
       <p className="text-sm text-slate">
         We start with your passport. Scan it and we&apos;ll read your details — you just
         review and correct. Passport is mandatory; Emirates ID is asked only if
@@ -1312,7 +1347,8 @@ function StepNav({
 }) {
   let blockReason: string | null = null;
   if (step === 0) {
-    if (!draft.passport.uploaded) blockReason = "Scan your passport to continue.";
+    if (!EMAIL_RE.test(draft.email.trim())) blockReason = "Enter a valid email address.";
+    else if (!draft.passport.uploaded) blockReason = "Scan your passport to continue.";
     else if (new Date(draft.passport.passport_expiry) < new Date())
       blockReason = "Passport is expired — provide a valid one.";
     else if (draft.residency_status === "unknown") blockReason = "Tell us your residency status.";

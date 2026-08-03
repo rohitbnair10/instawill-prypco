@@ -525,6 +525,8 @@ function addStalledLead(d: DB, input: StalledInput) {
   const draft = {
     lead_id: leadId,
     will_id: willId,
+    email: input.email,
+    phone: input.phone,
     passport: {
       uploaded: Boolean(input.passportUploaded),
       ocr: null,

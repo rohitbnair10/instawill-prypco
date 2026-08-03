@@ -467,6 +467,8 @@ export interface PortalPackage {
 export interface IntakeDraft {
   lead_id: string;
   will_id: string;
+  email: string;
+  phone: string;
   passport: {
     uploaded: boolean;
     ocr: {
