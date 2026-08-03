@@ -153,14 +153,20 @@ within a minute:
 do $$
 declare v_lead uuid; v_will uuid;
 begin
-  insert into leads (email, full_name, current_stage) values ('you@example.com','Test Client','review') returning id into v_lead;
-  insert into wills (lead_id, status) values (v_lead, 'in_review') returning id into v_will;
+  -- Use delivered@resend.dev (Resend's test sink) or your own verified email.
+  -- Resend's free tier blocks sends to @example.com and unverified domains.
+  insert into leads (email, full_name, current_stage)
+    values ('delivered@resend.dev', 'Test Client', 'review')
+    returning id into v_lead;
+  insert into wills (lead_id, status)
+    values (v_lead, 'in_review')
+    returning id into v_will;
   update wills set status = 'documents_pending' where id = v_will;  -- ARMS the cadence (workflow 01 sends step_1)
 end $$;
 ```
 Then flip it back (`update wills set status='in_review' …`) — the reminders
 cancel and a confirmation queues (workflow 02 sends it). Clean up with
-`delete from leads where email='you@example.com';`.
+`delete from leads where email='delivered@resend.dev';`.
 
 > **Note:** the app still writes to localStorage, so real user actions won't fire
 > this yet — that's **Stage 2 (store → Supabase port)**, which also fixes
