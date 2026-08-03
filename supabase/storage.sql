@@ -10,9 +10,16 @@
 -- (matched via a signed JWT claim, same pattern as schema.sql's RLS policies)
 -- before handling real client documents in production.
 
+-- Idempotent: safe to run more than once. `create policy` isn't re-runnable on
+-- its own (errors with "policy already exists"), so we drop first.
+
 insert into storage.buckets (id, name, public)
 values ('wills', 'wills', false)
 on conflict (id) do nothing;
+
+drop policy if exists "wills bucket: anon insert (demo)" on storage.objects;
+drop policy if exists "wills bucket: anon select (demo)" on storage.objects;
+drop policy if exists "wills bucket: anon update (demo)" on storage.objects;
 
 create policy "wills bucket: anon insert (demo)" on storage.objects
   for insert to anon
