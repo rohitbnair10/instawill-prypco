@@ -16,7 +16,7 @@
  * Only will-CONTENT that makes the will legally unregistrable ever blocks the
  * client (shares != 100, no UAE asset, missing/expired passport).
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   AssetType,
   Emirate,
@@ -1055,32 +1055,16 @@ function DocCaptureRow({
 const SERVICE_FEE_AED = 1500;
 
 /**
- * A handful of upcoming registration-appointment slots. Real scheduling would
- * come from the DIFC WPR calendar; for the prototype we generate the next few
- * weekday mornings/afternoons so the client can pick a concrete time up front.
+ * We do NOT have real-time DIFC WPR slot availability, so we can't let the
+ * client book a concrete time. Instead we capture a *preferred* slot; the
+ * actual appointment is confirmed once the lawyer has approved the draft.
  */
-function appointmentSlots(count = 6): { iso: string; label: string }[] {
-  const slots: { iso: string; label: string }[] = [];
-  const cursor = new Date();
-  cursor.setHours(0, 0, 0, 0);
-  const times = [10, 14]; // 10:00 and 14:00
-  while (slots.length < count) {
-    cursor.setDate(cursor.getDate() + 1);
-    const day = cursor.getDay();
-    if (day === 0 || day === 5 || day === 6) continue; // skip Fri/Sat/Sun (UAE weekend)
-    for (const h of times) {
-      if (slots.length >= count) break;
-      const d = new Date(cursor);
-      d.setHours(h, 0, 0, 0);
-      slots.push({
-        iso: d.toISOString(),
-        label: d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }) +
-          ` · ${h > 12 ? h - 12 : h}:00 ${h >= 12 ? "PM" : "AM"}`,
-      });
-    }
-  }
-  return slots;
-}
+const SLOT_PREFERENCES = [
+  "Weekday mornings",
+  "Weekday afternoons",
+  "Weekends",
+  "As soon as possible",
+] as const;
 
 function ReviewStep({
   draft,
@@ -1095,10 +1079,9 @@ function ReviewStep({
   structured: StructuredWill | null;
   aiStructured: boolean;
   submitted: boolean;
-  onSubmit: (documentsPending: boolean, booking: { appointmentAt: string }) => void;
+  onSubmit: (documentsPending: boolean, booking: { appointmentPreference: string }) => void;
 }) {
-  const slots = useMemo(() => appointmentSlots(), []);
-  const [appointmentAt, setAppointmentAt] = useState<string | null>(null);
+  const [slotPreference, setSlotPreference] = useState<string | null>(null);
   const [paid, setPaid] = useState(false);
 
   if (!structured) return null;
@@ -1149,9 +1132,9 @@ function ReviewStep({
             ? "Your will's content is locked in. We'll email a secure link for the outstanding documents — the lawyer can review the content now."
             : "Your will is complete and queued for lawyer review."}
         </p>
-        {appointmentAt && (
+        {paid && (
           <p className="mt-2 text-sm text-sage">
-            Appointment booked for {new Date(appointmentAt).toLocaleString()} · Payment received.
+            Payment received! We&apos;ll confirm your registration slot once a lawyer approves the draft.
           </p>
         )}
         <p className="mt-3 text-xs text-slate">
@@ -1198,29 +1181,29 @@ function ReviewStep({
         </Card>
       )}
 
-      {/* Appointment booking — captured up front, before the lawyer's time is
-          spent. A committed client with a booked slot is what gets reviewed. */}
+      {/* Preferred appointment — we don't have live DIFC WPR availability, so we
+          capture a preference now and confirm the actual slot after approval. */}
       <Card className="p-4">
-        <div className="text-sm font-medium text-ink">Book your registration appointment</div>
+        <div className="text-sm font-medium text-ink">Preferred registration appointment</div>
         <p className="mt-0.5 text-xs text-slate">
-          Pick a slot for your DIFC Wills Registry appointment. You can reschedule later
-          if you need to.
+          When suits you best for your DIFC Wills Registry appointment? We&apos;ll confirm the
+          exact slot once your draft is approved.
         </p>
-        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-          {slots.map((s) => {
-            const active = s.iso === appointmentAt;
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {SLOT_PREFERENCES.map((s) => {
+            const active = s === slotPreference;
             return (
               <button
-                key={s.iso}
+                key={s}
                 type="button"
-                onClick={() => setAppointmentAt(s.iso)}
-                className={`rounded-lg border px-3 py-2 text-xs transition-colors ${
+                onClick={() => setSlotPreference(s)}
+                className={`rounded-lg border px-3 py-2 text-sm transition-colors ${
                   active
                     ? "border-sage bg-sage/10 font-medium text-ink"
                     : "border-hairline bg-white text-slate hover:border-slate"
                 }`}
               >
-                {s.label}
+                {s}
               </button>
             );
           })}
@@ -1238,17 +1221,20 @@ function ReviewStep({
           </div>
           <div className="text-right">
             <div className="font-serif text-lg text-ink">AED {SERVICE_FEE_AED.toLocaleString()}</div>
-            {paid && <Pill tone="sage">Paid ✓</Pill>}
           </div>
         </div>
-        {!paid && (
+        {paid ? (
+          <div className="mt-3 rounded-lg border border-sage/30 bg-sage/8 p-3 text-sm text-sage">
+            Payment received! We&apos;ll confirm the registration slot once a lawyer approves the draft.
+          </div>
+        ) : (
           <Button
             className="mt-3 w-full"
             variant="secondary"
-            disabled={!appointmentAt}
+            disabled={!slotPreference}
             onClick={() => setPaid(true)}
           >
-            {appointmentAt ? `Pay AED ${SERVICE_FEE_AED.toLocaleString()} (demo)` : "Pick an appointment slot first"}
+            {slotPreference ? `Pay AED ${SERVICE_FEE_AED.toLocaleString()} (demo)` : "Choose a preferred time first"}
           </Button>
         )}
       </Card>
@@ -1260,11 +1246,11 @@ function ReviewStep({
 
       <div className="space-y-2">
         {(() => {
-          const ready = blocks.length === 0 && Boolean(appointmentAt) && paid;
+          const ready = blocks.length === 0 && Boolean(slotPreference) && paid;
           const gateText = blocks.length > 0
             ? null
-            : !appointmentAt
-            ? "Book an appointment slot above to continue."
+            : !slotPreference
+            ? "Choose a preferred appointment time above to continue."
             : !paid
             ? "Complete payment above to continue."
             : null;
@@ -1274,7 +1260,7 @@ function ReviewStep({
                 <Button
                   className="w-full"
                   disabled={!ready}
-                  onClick={() => onSubmit(true, { appointmentAt: appointmentAt! })}
+                  onClick={() => onSubmit(true, { appointmentPreference: slotPreference! })}
                 >
                   Submit now, finish documents later →
                 </Button>
@@ -1283,7 +1269,7 @@ function ReviewStep({
                   className="w-full"
                   variant="sage"
                   disabled={!ready}
-                  onClick={() => onSubmit(false, { appointmentAt: appointmentAt! })}
+                  onClick={() => onSubmit(false, { appointmentPreference: slotPreference! })}
                 >
                   Confirm &amp; submit for lawyer review →
                 </Button>

@@ -85,8 +85,8 @@ export function buildPortalPackage(
       })),
     step_9_appointment: {
       status: "client_to_book",
-      note: will.appointment_at
-        ? `Appointment already booked by the client for ${new Date(will.appointment_at).toLocaleString()} — confirm the DIFC WPR slot.`
+      note: will.appointment_preference
+        ? `Client's preferred slot: ${will.appointment_preference}. Confirm an actual DIFC WPR appointment against this preference.`
         : "Client books the DIFC WPR appointment (stays with the client).",
     },
     step_10_payment: {

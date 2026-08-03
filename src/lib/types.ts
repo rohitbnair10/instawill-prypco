@@ -205,12 +205,13 @@ export interface Will {
   portal_ready_at?: string | null;
   registered_at?: string | null;
   /**
-   * Registration appointment + payment are collected from the client UP FRONT,
-   * before the will enters the lawyer queue — a paying, committed client with a
-   * booked slot is what the lawyer's time is spent on. Null/`pending` until the
-   * client books and pays on the review step.
+   * Payment is collected from the client UP FRONT, before the will enters the
+   * lawyer queue — a paying, committed client is what the lawyer's time is
+   * spent on. We do NOT have real-time DIFC WPR slot availability, so we only
+   * capture a *preferred* slot here; the actual registration slot is confirmed
+   * later, after the lawyer approves the draft. `pending` until the client pays.
    */
-  appointment_at?: string | null;
+  appointment_preference?: string | null;
   payment_status?: PaymentStatus;
 }
 

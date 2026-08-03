@@ -312,7 +312,7 @@ export function createIntake(seed: {
       client_approved_at: null,
       portal_ready_at: null,
       registered_at: null,
-      appointment_at: null,
+      appointment_preference: null,
       payment_status: "pending",
     };
     const draft: IntakeDraft = {
@@ -533,7 +533,7 @@ export function recordDocument(willId: string, docType: DocType, patch: Partial<
 export function submitWill(
   willId: string,
   documentsPending: boolean,
-  booking?: { appointmentAt: string }
+  booking?: { appointmentPreference: string }
 ) {
   mutate((d) => {
     const will = d.wills.find((w) => w.id === willId);
@@ -542,9 +542,10 @@ export function submitWill(
     will.submitted_at = ts;
     will.status = documentsPending ? "documents_pending" : "submitted";
     will.status = "in_review"; // content is complete; visible to the lawyer either way
-    // Appointment + payment are captured before the case reaches the lawyer.
+    // Payment + a preferred slot are captured before the case reaches the
+    // lawyer. The actual slot is confirmed later (no real-time WPR availability).
     if (booking) {
-      will.appointment_at = booking.appointmentAt;
+      will.appointment_preference = booking.appointmentPreference;
       will.payment_status = "paid";
     }
     will.updated_at = ts;
@@ -560,7 +561,7 @@ export function submitWill(
       event_type: "will_submitted",
       payload: {
         documents_pending: documentsPending,
-        appointment_at: booking?.appointmentAt ?? null,
+        appointment_preference: booking?.appointmentPreference ?? null,
         paid: Boolean(booking),
       },
       created_at: ts,
@@ -960,7 +961,7 @@ export function generatePortalPackage(willId: string) {
     if (existing) {
       existing.package_json = packageJson;
       existing.package_text = packageText;
-      existing.appointment_at = will.appointment_at ?? existing.appointment_at;
+      // Payment was taken up front; the actual slot is still to be confirmed.
       existing.payment_status = will.payment_status ?? existing.payment_status;
     } else {
       d.portal_submissions.push({
@@ -971,8 +972,7 @@ export function generatePortalPackage(willId: string) {
         method: "manual_ops",
         ops_user_id: null,
         submitted_at: null,
-        // Appointment + payment were captured up front, before lawyer review.
-        appointment_at: will.appointment_at ?? null,
+        appointment_at: null, // confirmed later — no real-time WPR availability
         payment_status: will.payment_status ?? "pending",
         registration_outcome: "pending",
         rejection_reason: null,
