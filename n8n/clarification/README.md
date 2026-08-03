@@ -34,7 +34,7 @@ itself, so in practice each clarification goes out exactly once.
    host `aws-0-<region>.pooler.supabase.com`, port `5432`, db `postgres`,
    user `postgres.<project-ref>`, your DB password, SSL **require**.
 3. **Email credential** (SMTP / Resend / SendGrid). Set a real `fromEmail`.
-4. **Variable:** Settings → Variables → `APP_URL = https://app.instawill.ae`
+4. **Variable:** Settings → Variables → `APP_URL = https://instawill-prypco.vercel.app`
    (used for the reply link; falls back to that default if unset).
 5. Import `clarification_email.json`, assign both credentials on the red nodes,
    toggle **Active**.

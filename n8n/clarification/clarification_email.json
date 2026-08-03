@@ -28,7 +28,7 @@
         "toEmail": "={{ $json.email }}",
         "subject": "=Your lawyer has a question about your will, {{ $json.full_name.split(' ')[0] }}",
         "emailFormat": "html",
-        "html": "=<p>Hi {{ $json.full_name.split(' ')[0] }},</p><p style=\"white-space:pre-line\">{{ $json.message_final }}</p><p><a href=\"{{ ($vars.APP_URL || 'https://app.instawill.ae') + '/portal/' + $json.will_id }}\">Reply to your lawyer →</a></p><p>Thank you,<br>The InstaWill team</p>",
+        "html": "=<p>Hi {{ $json.full_name.split(' ')[0] }},</p><p style=\"white-space:pre-line\">{{ $json.message_final }}</p><p><a href=\"{{ ($vars.APP_URL || 'https://instawill-prypco.vercel.app') + '/portal/' + $json.will_id }}\">Reply to your lawyer →</a></p><p>Thank you,<br>The InstaWill team</p>",
         "options": {}
       },
       "id": "c1000000-0000-4000-8000-000000000003",
