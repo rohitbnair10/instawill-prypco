@@ -829,6 +829,25 @@ function ClarifyPanel({
       message,
       message
     );
+    // Mirror into Postgres so the n8n clarification workflow can pick it up
+    // and email the client. Fire-and-forget: a Supabase/network hiccup must
+    // never block the local demo flow (which already moved forward above).
+    fetch("/api/clarifications", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        leadName: lead.full_name,
+        leadEmail: lead.email,
+        leadPhone: lead.phone,
+        preferredChannel: lead.preferred_channel,
+        mode,
+        question,
+        docType: mode === "document_reupload" ? reuploadDoc ?? null : null,
+        channel,
+        messagePreview: message,
+        messageFinal: message,
+      }),
+    }).catch((err) => console.error("clarification mirror failed:", err));
     onSent();
   };
 

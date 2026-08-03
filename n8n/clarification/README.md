@@ -82,11 +82,38 @@ nothing). Clean up:
 delete from leads where email = 'delivered@resend.dev';  -- cascades to will + clarification
 ```
 
-## Note on going live
+## Wired to the real lawyer desk
 
-The app still writes state to **localStorage**, so a real "Ask the client" click
-in the lawyer desk won't create a Postgres `clarifications` row yet — that's the
-store → Supabase port (Stage 2). Until then, the SQL above is how you exercise it.
+A real "Ask the client" → **Send** click in the lawyer desk now mirrors into
+Postgres automatically — no manual SQL needed. The UI still runs on the local
+demo store (unchanged), but `send()` in `ClarifyPanel`
+(`src/components/lawyer/LawyerDesk.tsx`) also fires a background request to
+`POST /api/clarifications` (`src/app/api/clarifications/route.ts`), which:
+
+1. finds/creates the lead in Postgres by email,
+2. finds/creates a will for that lead,
+3. finds/creates a demo lawyer user (no real auth yet, so `raised_by` needs
+   *some* staff row — one is created once and reused),
+4. inserts the `clarifications` row with `status = 'sent'`.
+
+That row is exactly what the poller above is watching for — the email goes out
+within a minute, no manual SQL required.
+
+**Requires** `SUPABASE_SERVICE_ROLE_KEY` set (server-side only, see
+`.env.example`) — the anon key can't insert into these tables (no anon INSERT
+policy by design), so the route uses the service-role key to bypass RLS. If
+that key isn't set, the route no-ops silently and the local demo flow is
+unaffected — nothing to configure if you don't want the live wiring yet.
+
+**Deliverability note:** the seed demo leads all use `@example.com` addresses,
+which Resend's free tier rejects (see the earlier fix in this repo). To
+actually receive the email, either add your own real address as a lead in the
+UI, or manually point a test lead's email at `delivered@resend.dev` /
+your own inbox in Supabase before clicking Send.
+
+This is intentionally scoped — only the clarification path writes to Postgres.
+The rest of the app (intake, documents, approvals) still runs on localStorage;
+porting all of it is a separate, larger job.
 
 ## Production hardening
 
