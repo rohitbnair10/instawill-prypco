@@ -84,7 +84,7 @@ export function ClarificationResponse({
         {clarification.mode === "document_reupload" ? (
           <>
             <p className="mb-2 text-sm text-slate">
-              Upload the document below — read by Claude vision, same as during intake.
+              Upload the document below — we&apos;ll read it automatically, same as during intake.
             </p>
             {clarification.doc_type === "passport" && (
               <ImageCapture<PassportExtract>

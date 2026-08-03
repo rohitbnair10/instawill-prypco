@@ -463,7 +463,7 @@ function IntakeWizard() {
             </span>
             {result && (
               <Pill tone={result.source === "llm" ? "sage" : "amber"}>
-                {result.source === "llm" ? "LLM-structured" : "Fallback"}
+                {result.source === "llm" ? "Structured" : "Draft mode"}
               </Pill>
             )}
           </div>
@@ -593,7 +593,7 @@ function IdentityStep({
         <Card className="p-5">
           <div className="font-medium text-ink">Scan your passport</div>
           <p className="mt-1 text-xs text-slate">
-            Photo page only. Read by Claude vision, then you review and correct.
+            Photo page only. We&apos;ll read the details automatically, then you review and correct.
           </p>
           <div className="mt-4">
             <ImageCapture<PassportExtract>
@@ -702,7 +702,7 @@ function WishesStep({
     <div className="space-y-4">
       <p className="text-sm text-slate">
         Tell us about your family, your assets in the UAE, and how you want things
-        divided — in your own words. No forms to fill in: a real AI call reads this
+        divided — in your own words. No forms to fill in: our system reads this
         and structures it into your will.
       </p>
       <textarea
@@ -728,8 +728,8 @@ function WishesStep({
         {structuring ? "Structuring your wishes…" : "Structure my wishes →"}
       </Button>
       <p className="text-center text-xs text-slate">
-        This calls a real Anthropic model to turn your paragraph into a structured
-        will — the next screen shows exactly what it understood, for you to correct.
+        This turns your paragraph into a structured will — the next screen shows
+        exactly what we understood, for you to correct.
       </p>
     </div>
   );

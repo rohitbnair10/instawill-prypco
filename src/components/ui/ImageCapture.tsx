@@ -131,9 +131,9 @@ export function ImageCapture<T>({
         // never surface on a client screen. A short reassuring line instead.
         <div className="flex items-center gap-2 text-xs">
           {lastResult.source === "vision" ? (
-            <Pill tone="sage">Read by Claude vision</Pill>
+            <Pill tone="sage">Auto-read</Pill>
           ) : (
-            <MockLabel>OCR simulated</MockLabel>
+            <MockLabel>Simulated read</MockLabel>
           )}
           <span className="text-slate">We&apos;ve captured the details from your document.</span>
         </div>

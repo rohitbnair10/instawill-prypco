@@ -353,7 +353,7 @@ export function runRules(will: StructuredWill, ctx: RuleContext): RuleResult[] {
       check_key: "ai_distribution",
       severity: "warn",
       owner: "lawyer",
-      detail: `AI-structured from free text ("${will.distribution_summary}"). Model's notes: ${
+      detail: `Auto-structured from free text ("${will.distribution_summary}"). System notes: ${
         will.confidence_notes?.trim() || "(none)"
       }. Verify this matches the client's intent before approval.`,
     });

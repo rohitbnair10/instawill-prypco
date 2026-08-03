@@ -271,7 +271,7 @@ function CaseReview({ will }: { will: Will }) {
                 <Pill tone="ink">DIFC Full Will</Pill>
                 <Pill tone={complexity === "complex" ? "amber" : "sage"}>{complexity} case</Pill>
                 {structured.assets.some((a) => a.needs_adjd) && <Pill tone="amber">ADJD split</Pill>}
-                {will.ai_structured && <Pill tone="amber">AI-structured</Pill>}
+                {will.ai_structured && <Pill tone="amber">Auto-structured</Pill>}
                 {will.lawyer_made_changes && <Pill tone="slate">Lawyer amended</Pill>}
               </div>
             </div>
@@ -948,7 +948,7 @@ function labelForCheck(key: Check["check_key"]): string {
     deed_joint_owner: "Title deed — joint ownership",
     business_shares: "Business shares — transferability",
     substitution_missing: "Missing substitution instruction",
-    ai_distribution: "AI-structured distribution — verify",
+    ai_distribution: "Auto-structured distribution — verify",
     guardian_needed: "Guardian nomination",
   };
   return map[key] || key;

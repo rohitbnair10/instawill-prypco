@@ -32,10 +32,10 @@ export function fallbackStructure(
     assets: [],
     foreign_will: false,
     distribution_summary: hasText
-      ? "Not structured — no ANTHROPIC_API_KEY configured. The raw wishes text below needs manual entry."
+      ? "Not structured — automated drafting isn't configured in this environment. The raw wishes text below needs manual entry."
       : "No wishes provided yet.",
     confidence_notes: hasText
-      ? `Structuring requires a real LLM call, which is not configured in this environment. Raw wishes text (verbatim, for manual entry): "${wishesText.trim()}"`
+      ? `Automated structuring isn't configured in this environment. Raw wishes text (verbatim, for manual entry): "${wishesText.trim()}"`
       : "No wishes text was provided.",
   };
 }
