@@ -383,7 +383,11 @@ begin
       jsonb_build_object(
         'from', old.status,
         'to', new.status,
-        'client_action_pending', new_pending
+        -- Guard for the NEW state: does the client now own the next action?
+        'client_action_pending', new_pending,
+        -- Guard for the OLD state: lets n8n fire the loop-closure confirmation
+        -- when a client LEAVES a pending state, without re-listing the states.
+        'from_client_action_pending', old_pending
       ));
 
     -- Left a client-pending state (status changed and the old one was pending)

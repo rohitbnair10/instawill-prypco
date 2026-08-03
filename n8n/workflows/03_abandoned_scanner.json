@@ -1,0 +1,61 @@
+{
+  "name": "InstaWill · 03 Abandoned scanner",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "hours", "hoursInterval": 24, "triggerAtHour": 9 }] }
+      },
+      "id": "c3000000-0000-4000-8000-000000000001",
+      "name": "Daily 09:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [180, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select l.id as lead_id, l.full_name, l.email, l.phone, l.current_stage, w.id as will_id\nfrom leads l\njoin wills w on w.lead_id = l.id\nwhere l.current_stage in ('identity','wishes','confirm','documents','review')\n  and l.stage_updated_at < now() - interval '3 days'\n  and not exists (select 1 from notifications n where n.lead_id = l.id and n.trigger_state = 'abandoned' and n.created_at > l.stage_updated_at)\nlimit 50;",
+        "options": {}
+      },
+      "id": "c3000000-0000-4000-8000-000000000002",
+      "name": "Select abandoned (>=3d)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "wills@instawill.ae",
+        "toEmail": "={{ $json.email }}",
+        "subject": "=Your will is saved and ready when you are, {{ $json.full_name.split(' ')[0] }}",
+        "emailFormat": "html",
+        "html": "=<p>Hi {{ $json.full_name.split(' ')[0] }},</p><p>You started your DIFC will with us a little while ago — it's saved exactly where you left off. Whenever you have a few minutes, pick straight back up:</p><p><a href=\"{{ $env.APP_URL || 'https://app.instawill.ae' }}/portal/{{ $json.will_id }}\">Continue your will →</a></p><p>No pressure at all. If something got in the way, just reply — a real person will help.</p><p>— The InstaWill team</p>",
+        "options": {}
+      },
+      "id": "c3000000-0000-4000-8000-000000000003",
+      "name": "Send abandoned nudge",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into notifications (will_id, lead_id, trigger_state, channel, source, sequence_step, template_key, portal_link, sent_at)\nvalues ('{{ $json.will_id }}', '{{ $json.lead_id }}', 'abandoned', 'email', 'system', 'step_1', 'abandoned', '{{ $env.APP_URL || 'https://app.instawill.ae' }}/portal/{{ $json.will_id }}', now());",
+        "options": {}
+      },
+      "id": "c3000000-0000-4000-8000-000000000004",
+      "name": "Log abandoned nudge",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Daily 09:00": { "main": [[{ "node": "Select abandoned (>=3d)", "type": "main", "index": 0 }]] },
+    "Select abandoned (>=3d)": { "main": [[{ "node": "Send abandoned nudge", "type": "main", "index": 0 }]] },
+    "Send abandoned nudge": { "main": [[{ "node": "Log abandoned nudge", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}

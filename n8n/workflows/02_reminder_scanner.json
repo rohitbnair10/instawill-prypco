@@ -1,0 +1,99 @@
+{
+  "name": "InstaWill · 02 Reminder scanner",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 15 }] }
+      },
+      "id": "b2000000-0000-4000-8000-000000000001",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [180, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select n.id as notification_id, n.will_id, n.lead_id, n.trigger_state, n.sequence_step, n.template_key, n.portal_link, n.blocking_reason_snapshot, l.full_name, l.email, w.status as will_status\nfrom notifications n\njoin wills w on w.id = n.will_id\njoin leads l on l.id = n.lead_id\nwhere n.sent_at is null and n.cancelled_at is null and n.scheduled_for <= now() and n.source = 'system'\n  and w.active_notification_state = n.trigger_state\norder by n.scheduled_for\nlimit 50;",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000002",
+      "name": "Select due reminders",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "update notifications set sent_at = now() where id = '{{ $json.notification_id }}' and sent_at is null and cancelled_at is null returning id;",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000003",
+      "name": "Claim (no double-send)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [660, 300],
+      "notes": "Runs once per due row. If it returns 0 rows, another run already sent/cancelled it — the IF below skips the email."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "claimed",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "exists", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000004",
+      "name": "Claimed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "wills@instawill.ae",
+        "toEmail": "={{ $('Select due reminders').item.json.email }}",
+        "subject": "=Just circling back on your will",
+        "emailFormat": "html",
+        "html": "=<p>Hi {{ $('Select due reminders').item.json.full_name.split(' ')[0] }},</p><p>Just a gentle nudge — your will is still saved and ready. Whenever you have a couple of minutes:</p><p><a href=\"{{ $('Select due reminders').item.json.portal_link }}\">Pick up where you left off →</a></p><p>— The InstaWill team</p>",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000005",
+      "name": "Send reminder email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1140, 240],
+      "notes": "Vary tone by sequence_step (step_2 gentle, step_3 warmer/offers help). See n8n/templates.md."
+    },
+    {
+      "parameters": {},
+      "id": "b2000000-0000-4000-8000-000000000006",
+      "name": "Skip (already handled)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1140, 420]
+    }
+  ],
+  "connections": {
+    "Every 15 min": { "main": [[{ "node": "Select due reminders", "type": "main", "index": 0 }]] },
+    "Select due reminders": { "main": [[{ "node": "Claim (no double-send)", "type": "main", "index": 0 }]] },
+    "Claim (no double-send)": { "main": [[{ "node": "Claimed?", "type": "main", "index": 0 }]] },
+    "Claimed?": {
+      "main": [
+        [{ "node": "Send reminder email", "type": "main", "index": 0 }],
+        [{ "node": "Skip (already handled)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "active": false
+}
