@@ -564,9 +564,14 @@ function AmendDraftPanel({ willId, structured }: { willId: string; structured: S
               </div>
               <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
                 <BlurCommitInput
-                  label="Share %"
+                  label="Residuary %"
                   defaultValue={String(b.share_pct)}
                   onCommit={(v) => lawyerSetBeneficiaryField(willId, b.name, "share_pct", Number(v) || 0)}
+                />
+                <BlurCommitInput
+                  label="Specific gift"
+                  defaultValue={b.specific_gift ?? ""}
+                  onCommit={(v) => lawyerSetBeneficiaryField(willId, b.name, "specific_gift", v)}
                 />
                 <BlurCommitInput
                   label="Substitution"

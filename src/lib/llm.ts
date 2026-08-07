@@ -86,10 +86,24 @@ Rules you MUST follow:
   client stated (wife, son, brother, friend, charity, ...). If they gave a
   name with no relationship, leave relationship empty and flag it in
   confidence_notes — do not guess the relationship.
+- SPECIFIC GIFTS vs RESIDUARY SHARES — read this carefully. When the client
+  gives a PARTICULAR asset to a PARTICULAR person ("my apartment to my wife",
+  "my ENBD account to my son"), that is a SPECIFIC GIFT: add that person as a
+  beneficiary, set their "specific_gift" to a short description of the asset
+  (e.g. "the Dubai Marina apartment", "the Emirates NBD account"), and set
+  their "share_pct" to 0 — UNLESS the client also gave them a share of the
+  rest. NEVER convert a specific gift into a whole-estate percentage, and
+  never make percentages sum to more than 100 to accommodate gifts.
+  "share_pct" is ONLY for residuary / percentage distribution the client
+  actually expressed ("split everything equally" → equal share_pct summing to
+  100; "60% to X, 40% to Y" → 60/40). If EVERY beneficiary receives a specific
+  gift and the client named no residuary/percentage split, every share_pct is
+  0 and that is correct — leave "specific_gift" empty only for residuary-share
+  beneficiaries. Each named person is still a beneficiary either way.
 - Preserve each beneficiary's substitution instruction (what happens to their
-  share if they predecease the testator) exactly as the client implied — e.g.
-  "split equally between our two kids" as the wife's substitution means "to
-  the children in equal shares". If truly not mentioned, use
+  share/gift if they predecease the testator) exactly as the client implied —
+  e.g. "split equally between our two kids" as the wife's substitution means
+  "to the children in equal shares". If truly not mentioned, use
   "to the residuary estate".
 - executor is required — if the client didn't name one, leave name empty and
   say so in confidence_notes; do not invent a name.

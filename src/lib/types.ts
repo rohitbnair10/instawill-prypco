@@ -414,10 +414,17 @@ export interface StructuredWill {
   beneficiaries: Array<{
     name: string;
     relationship: string;
+    /** Share of the RESIDUARY estate (what's left after specific gifts). 0 if
+     *  this person only receives a specific_gift. */
     share_pct: number;
     is_minor: boolean;
     substitution: string;
     held_in_trust: boolean;
+    /** A specific asset given to this person in full (e.g. "the Dubai Marina
+     *  apartment", "the Emirates NBD account"). Empty when they instead take a
+     *  share of the residuary estate via share_pct. Optional for backward
+     *  compatibility; the schema defaults it to "". */
+    specific_gift?: string;
   }>;
   executor: { name: string; relationship: string };
   substitute_executor: { name: string; relationship: string } | null;

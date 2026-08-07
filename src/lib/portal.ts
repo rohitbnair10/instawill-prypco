@@ -26,7 +26,13 @@ export function buildPortalPackage(
   documents: WillDocument[]
 ): PortalPackage {
   const needsAdjd = structured.assets.some((a) => a.needs_adjd);
-  const total = structured.beneficiaries.reduce((s, b) => s + (b.share_pct || 0), 0);
+  // share_pct is the residuary share; residuary must total 100% unless every
+  // gift is a specific asset assigned to a named person (all share_pct = 0).
+  const residuaryTotal = structured.beneficiaries.reduce((s, b) => s + (b.share_pct || 0), 0);
+  const hasSpecificGifts = structured.beneficiaries.some((b) => b.specific_gift?.trim());
+  const distributionOk =
+    Math.round(residuaryTotal * 100) / 100 === 100 ||
+    (residuaryTotal === 0 && hasSpecificGifts);
 
   return {
     generated_at: new Date().toISOString(),
@@ -65,13 +71,14 @@ export function buildPortalPackage(
       name: b.name,
       relationship: b.relationship,
       share_pct: b.share_pct,
+      specific_gift: b.specific_gift?.trim() || null,
       is_minor: b.is_minor,
       held_in_trust: b.held_in_trust,
       substitution: b.substitution,
     })),
     step_6_distribution: {
       summary: structured.distribution_summary,
-      sums_to_100: Math.round(total * 100) / 100 === 100,
+      sums_to_100: distributionOk,
     },
     step_7_witnesses: {
       note: "Two witnesses required at registration; neither may be a beneficiary.",
@@ -182,8 +189,10 @@ export function buildPortalPackageText(
     const flags = [
       bb.is_minor ? (bb.held_in_trust ? "minor — in trust" : "minor — ⚠ NO TRUST") : null,
     ].filter(Boolean);
+    // A specific gift takes the "receives" column; otherwise the residuary %.
+    const receives = bb.specific_gift ? `gift: ${String(bb.specific_gift)}` : `${bb.share_pct}% residue`;
     lines.push(
-      `  ${i + 1}. ${String(bb.name).padEnd(20, " ")} ${String(bb.relationship).padEnd(10, " ")} ${bb.share_pct}%${
+      `  ${i + 1}. ${String(bb.name).padEnd(20, " ")} ${String(bb.relationship).padEnd(10, " ")} ${receives}${
         flags.length ? "   (" + flags.join(", ") + ")" : ""
       }`
     );
@@ -193,7 +202,7 @@ export function buildPortalPackageText(
 
   lines.push("STEP 6 · DISTRIBUTION");
   lines.push(`  ${pkg.step_6_distribution.summary}`);
-  lines.push(`  By shares of estate · sums to 100% ${pkg.step_6_distribution.sums_to_100 ? "✓" : "✗"}`);
+  lines.push(`  Distribution accounted for ${pkg.step_6_distribution.sums_to_100 ? "✓" : "✗"}`);
   lines.push("");
 
   lines.push("STEP 7 · WITNESSES");

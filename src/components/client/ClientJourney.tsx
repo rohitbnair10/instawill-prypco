@@ -824,7 +824,7 @@ function ConfirmStep({
                 />
                 <TextInput
                   type="number"
-                  placeholder="%"
+                  placeholder="Residuary %"
                   value={String(b.share_pct)}
                   onChange={(e) => setBeneficiary(i, { share_pct: Number(e.target.value) || 0 })}
                 />
@@ -839,7 +839,13 @@ function ConfirmStep({
               </div>
               <TextInput
                 className="mt-2"
-                placeholder="If they predecease me, their share goes to…"
+                placeholder="Specific gift for this person (e.g. the Dubai Marina apartment) — leave blank if they take a % share"
+                value={b.specific_gift ?? ""}
+                onChange={(e) => setBeneficiary(i, { specific_gift: e.target.value })}
+              />
+              <TextInput
+                className="mt-2"
+                placeholder="If they predecease me, this goes to…"
                 value={b.substitution}
                 onChange={(e) => setBeneficiary(i, { substitution: e.target.value })}
               />
@@ -852,7 +858,7 @@ function ConfirmStep({
                 ...structured,
                 beneficiaries: [
                   ...structured.beneficiaries,
-                  { name: "", relationship: "", share_pct: 0, is_minor: false, substitution: "", held_in_trust: false },
+                  { name: "", relationship: "", share_pct: 0, is_minor: false, substitution: "", held_in_trust: false, specific_gift: "" },
                 ],
               })
             }

@@ -45,6 +45,12 @@ export function buildSchedule1(
   const w = will;
   const id = identity;
 
+  // Specific gifts (an asset assigned to a named person) render in clause 6;
+  // residuary-share beneficiaries (share_pct > 0) render in clause 8. A person
+  // can appear in both if they get a specific gift AND a residuary share.
+  const specificGiftBenes = w ? w.beneficiaries.filter((b) => b.specific_gift?.trim()) : [];
+  const residuaryBenes = w ? w.beneficiaries.filter((b) => (b.share_pct || 0) > 0) : [];
+
   const clauses: Clause[] = [
     {
       n: "1",
@@ -132,18 +138,32 @@ export function buildSchedule1(
     {
       n: "6",
       title: "Specific Gifts",
-      body: [
-        [
-          text("I make the following specific gifts from my UAE Estate: "),
-          slot(
-            w && w.assets.length
-              ? w.assets.map((a) => describeAsset(a)).join("; ")
-              : null,
-            "specific gifts / assets"
-          ),
-          text("."),
-        ],
-      ],
+      body: specificGiftBenes.length
+        ? specificGiftBenes.map((b) => [
+            text("I give "),
+            slot(b.specific_gift, "gift"),
+            text(" to "),
+            slot(b.name, "beneficiary"),
+            text(" ("),
+            slot(b.relationship, "relationship"),
+            text(")"),
+            b.is_minor && !b.held_in_trust
+              ? text(", to be held on trust until they attain 21 years of age")
+              : text(""),
+            text("."),
+          ])
+        : [
+            [
+              text("I make the following specific gifts from my UAE Estate: "),
+              slot(
+                w && w.assets.length
+                  ? w.assets.map((a) => describeAsset(a)).join("; ")
+                  : null,
+                "specific gifts / assets"
+              ),
+              text("."),
+            ],
+          ],
     },
     {
       n: "7",
@@ -159,24 +179,31 @@ export function buildSchedule1(
     {
       n: "8",
       title: "Residuary Gifts",
-      body:
-        w && w.beneficiaries.length
-          ? w.beneficiaries.map((b) => [
-              text("I give "),
-              slot(`${b.share_pct}%`, "share"),
-              text(" of the residue of my UAE Estate to "),
-              slot(b.name, "beneficiary"),
-              text(" ("),
-              slot(b.relationship, "relationship"),
-              text(")"),
-              b.is_minor && !b.held_in_trust
-                ? text(", to be held on trust until they attain 21 years of age")
-                : text(""),
-              text(". If they predecease me, their share passes "),
-              slot(b.substitution, "substitution"),
-              text("."),
-            ])
-          : [[slot(null, "residuary beneficiaries")]],
+      body: residuaryBenes.length
+        ? residuaryBenes.map((b) => [
+            text("I give "),
+            slot(`${b.share_pct}%`, "share"),
+            text(" of the residue of my UAE Estate to "),
+            slot(b.name, "beneficiary"),
+            text(" ("),
+            slot(b.relationship, "relationship"),
+            text(")"),
+            b.is_minor && !b.held_in_trust
+              ? text(", to be held on trust until they attain 21 years of age")
+              : text(""),
+            text(". If they predecease me, their share passes "),
+            slot(b.substitution, "substitution"),
+            text("."),
+          ])
+        : specificGiftBenes.length
+        ? [
+            [
+              text(
+                "I have disposed of my UAE Estate by the specific gifts above and make no separate residuary gift."
+              ),
+            ],
+          ]
+        : [[slot(null, "residuary beneficiaries")]],
     },
     {
       n: "9",

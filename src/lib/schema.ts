@@ -40,6 +40,9 @@ export const structuredWillSchema = z.object({
         share_pct: z.number().min(0).max(100),
         is_minor: z.boolean(),
         substitution: z.string(),
+        // A specific asset gifted to this person in full. Empty = they take a
+        // residuary share via share_pct. Defaulted to "" if the model omits it.
+        specific_gift: z.string().default(""),
         // Not part of the model's required output — the lawyer sets this.
         // Defaulted to false if the model omits it.
         held_in_trust: z.boolean().default(false),
@@ -101,15 +104,26 @@ export const structuredWillJsonSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["name", "relationship", "share_pct", "is_minor", "substitution"],
+        required: ["name", "relationship", "share_pct", "is_minor", "substitution", "specific_gift"],
         properties: {
           name: { type: "string" },
           relationship: { type: "string" },
-          share_pct: { type: "number", minimum: 0, maximum: 100 },
+          share_pct: {
+            type: "number",
+            minimum: 0,
+            maximum: 100,
+            description:
+              "share of the RESIDUARY estate (what's left after specific gifts). 0 if this person only receives a specific_gift.",
+          },
           is_minor: { type: "boolean", description: "true if beneficiary is under 21" },
           substitution: {
             type: "string",
             description: "where the share goes if this beneficiary predeceases the testator",
+          },
+          specific_gift: {
+            type: "string",
+            description:
+              "a particular asset given to this person in full (e.g. 'the Dubai Marina apartment', 'the Emirates NBD account'). Empty string if they instead take a residuary share via share_pct.",
           },
         },
       },

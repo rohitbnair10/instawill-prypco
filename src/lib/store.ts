@@ -836,7 +836,7 @@ export function lawyerSetBeneficiaryTrust(willId: string, name: string, heldInTr
 export function lawyerSetBeneficiaryField(
   willId: string,
   name: string,
-  field: "share_pct" | "substitution" | "relationship",
+  field: "share_pct" | "substitution" | "relationship" | "specific_gift",
   value: string | number
 ) {
   lawyerUpdateStructuredWill(willId, (w) => {

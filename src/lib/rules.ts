@@ -139,21 +139,35 @@ export function runRules(will: StructuredWill, ctx: RuleContext): RuleResult[] {
     });
   }
 
-  // Shares total 100%.
-  const total = will.beneficiaries.reduce((s, b) => s + (b.share_pct || 0), 0);
-  if (Math.round(total * 100) / 100 !== 100) {
-    out.push({
-      check_key: "shares_sum",
-      severity: "block",
-      owner: "client",
-      detail: `Beneficiary shares total ${total}% (must equal 100%).`,
-    });
-  } else {
+  // Distribution adds up. share_pct is the RESIDUARY share (what's left after
+  // specific gifts), so residuary shares must total 100% — UNLESS every gift is
+  // a specific asset assigned to a named person (all share_pct = 0), in which
+  // case there is no residuary pool to divide and that is valid.
+  const residuaryTotal = will.beneficiaries.reduce((s, b) => s + (b.share_pct || 0), 0);
+  const hasSpecificGifts = will.beneficiaries.some((b) => b.specific_gift?.trim());
+  const rounded = Math.round(residuaryTotal * 100) / 100;
+  if (rounded === 100) {
     out.push({
       check_key: "shares_sum",
       severity: "ok",
       owner: "client",
-      detail: "Beneficiary shares total exactly 100%.",
+      detail: "Residuary shares total exactly 100%.",
+    });
+  } else if (rounded === 0 && hasSpecificGifts) {
+    out.push({
+      check_key: "shares_sum",
+      severity: "ok",
+      owner: "client",
+      detail: "Each gift is assigned to a specific person — no residuary split to total.",
+    });
+  } else {
+    out.push({
+      check_key: "shares_sum",
+      severity: "block",
+      owner: "client",
+      detail: hasSpecificGifts
+        ? `The shares of the remaining estate total ${residuaryTotal}% (must equal 100%, or leave every gift assigned to a specific person).`
+        : `Beneficiary shares total ${residuaryTotal}% (must equal 100%).`,
     });
   }
 
@@ -228,14 +242,17 @@ export function runRules(will: StructuredWill, ctx: RuleContext): RuleResult[] {
     (b) => b.is_minor && !b.held_in_trust
   );
   if (minorsUnresolved.length) {
-    minorsUnresolved.forEach((b) =>
+    minorsUnresolved.forEach((b) => {
+      const receives = b.specific_gift?.trim()
+        ? b.specific_gift.trim()
+        : `${b.share_pct}%`;
       out.push({
         check_key: "minor_no_trust",
         severity: "warn",
         owner: "lawyer",
-        detail: `${b.name} (${b.share_pct}%) is under 21 and cannot inherit outright — this is a hard registration blocker until a lawyer sets a trust/holding mechanism.`,
-      })
-    );
+        detail: `${b.name} (${receives}) is under 21 and cannot inherit outright — this is a hard registration blocker until a lawyer sets a trust/holding mechanism.`,
+      });
+    });
   }
 
   // Duplicate beneficiary (same person listed twice).
